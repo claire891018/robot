@@ -9,7 +9,7 @@ from streamlit_webrtc import WebRtcMode, webrtc_streamer
 import matplotlib.pyplot as plt
 import websockets
 
-ASR_WS_URL = st.secrets.get("ASR_WS_URL", "ws://140.116.158.98:10180/asr")
+ASR_WS_URL = st.secrets.get("ASR_WS_URL", "ws://140.116.158.98:9999/asr")
 
 st.set_page_config(
     page_title="Listener Demo",
