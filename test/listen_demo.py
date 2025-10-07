@@ -1,3 +1,17 @@
+import sys
+from pathlib import Path
+
+HERE = Path(__file__).resolve()
+# 依序嘗試：.../robot、.../repo 根、.../更上一層
+for up in [HERE.parent, HERE.parents[1], HERE.parents[2]]:
+    src_dir = up / "src"
+    if src_dir.exists():
+        sys.path.insert(0, str(up))  
+        break
+
+from src.listener import Listener
+
+
 import logging
 import queue
 import threading
@@ -8,8 +22,6 @@ import pydub
 import streamlit as st
 from streamlit_webrtc import WebRtcMode, webrtc_streamer
 import matplotlib.pyplot as plt
-
-from src.listener import Listener 
 
 # sound_window_len = 5000  #
 # sound_window_buffer = None
