@@ -1,18 +1,7 @@
 import sys
 from pathlib import Path
 
-HERE = Path(__file__).resolve()
-# 依序嘗試：.../robot、.../repo 根、.../更上一層
-for up in [HERE.parent, HERE.parents[1], HERE.parents[2]]:
-    src_dir = up / "src"
-    if src_dir.exists():
-        sys.path.insert(0, str(up))  
-        break
-
-from src.listener import Listener
-
-
-import logging
+import logging, queue, threading, asyncio, json
 import queue
 import threading
 from typing import List, Dict
@@ -22,9 +11,12 @@ import pydub
 import streamlit as st
 from streamlit_webrtc import WebRtcMode, webrtc_streamer
 import matplotlib.pyplot as plt
+import websockets
 
 # sound_window_len = 5000  #
 # sound_window_buffer = None
+
+ASR_WS_URL = st.secrets.get("ASR_WS_URL", "ws://127.0.0.1:10180/asr")
 
 st.set_page_config(
     page_title="Listener Demo",
@@ -35,10 +27,6 @@ st.set_page_config(
 logger = logging.getLogger(__name__)
 
 def init_state():
-    if "listener" not in st.session_state:
-        st.session_state.listener = None
-    if "listener_running" not in st.session_state:
-        st.session_state.listener_running = False
     if "events" not in st.session_state:
         st.session_state.events = []  # type: List[Dict]
     if "lock" not in st.session_state:
@@ -48,9 +36,53 @@ def init_state():
     if "sound_window_len" not in st.session_state:
         st.session_state.sound_window_len = 5000  # 5 秒滾動窗
 
+    # WebSocket 背景 worker
+    if "ws_thread" not in st.session_state:
+        st.session_state.ws_thread = None
+    if "send_q" not in st.session_state:  # 往後端送的音訊（sync queue）
+        st.session_state.send_q: queue.Queue = queue.Queue(maxsize=64)
+    if "recv_q" not in st.session_state:  # 後端回傳的事件（sync queue）
+        st.session_state.recv_q: queue.Queue = queue.Queue()
+    if "ws_running" not in st.session_state:
+        st.session_state.ws_running = False
+
+
 def on_evt(evt: Dict):
     with st.session_state.lock:
         st.session_state.events.append(evt)
+        
+# === 4) WebSocket 背景 worker：把 sync queue 與 asyncio 溝通起來 ===
+async def asr_loop_async(send_q: queue.Queue, recv_q: queue.Queue):
+    async with websockets.connect(ASR_WS_URL, max_size=2**23) as ws:
+        await ws.send(json.dumps({"type": "start", "sr": 16000, "lang": "zh"}))
+
+        async def reader():
+            try:
+                async for msg in ws:
+                    try:
+                        evt = json.loads(msg)
+                    except Exception:
+                        evt = {"type": "error", "error": "bad_json", "detail": str(msg)}
+                    recv_q.put(evt)
+            except Exception as e:
+                recv_q.put({"type": "error", "error": "ws_reader", "detail": str(e)})
+
+        reader_task = asyncio.create_task(reader())
+
+        try:
+            while True:
+                kind, payload = await asyncio.to_thread(send_q.get)
+                if kind == "audio":
+                    await ws.send(payload)  # bytes = 16k mono s16le
+                elif kind == "end":
+                    await ws.send(json.dumps({"type": "end"}))
+                    break
+        finally:
+            await reader_task
+
+def ws_worker():
+    asyncio.run(asr_loop_async(st.session_state.send_q, st.session_state.recv_q))
+
 
 def resample_to_16k(mono_i16: np.ndarray, sr: int) -> np.ndarray:
     if sr == 16000:
@@ -101,25 +133,24 @@ def main():
 
     fig_place = st.empty()
     fig, (ax_time, ax_freq) = plt.subplots(2, 1, gridspec_kw={"top": 1.5, "bottom": 0.2})
-    
+
     ctx = webrtc_streamer(
         key="sendonly-audio",
         mode=WebRtcMode.SENDONLY,
-        audio_receiver_size=256,           
-        media_stream_constraints={"audio": True},  
+        audio_receiver_size=256,
+        media_stream_constraints={"audio": True},
         async_processing=True,
-        rtc_configuration={                    # ← 官方建議：傳「純 dict」
-        "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
-        },
+        rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
     )
 
-
     if ctx.state.playing and ctx.audio_receiver:
-        if not st.session_state.listener_running:
-            st.session_state.listener = Listener(on_utterance=on_evt, source="external")
-            st.session_state.listener.start()
-            st.session_state.listener_running = True
+        # 啟動 WS 背景執行緒（只啟一次）
+        if not st.session_state.ws_running:
+            st.session_state.ws_thread = threading.Thread(target=ws_worker, daemon=True)
+            st.session_state.ws_thread.start()
+            st.session_state.ws_running = True
 
+        # 取一批 frames → 轉 16k mono → 丟到 send_q
         try:
             audio_frames = ctx.audio_receiver.get_frames(timeout=1)
         except queue.Empty:
@@ -128,7 +159,6 @@ def main():
         sound_chunk = pydub.AudioSegment.empty()
         for af in audio_frames:
             arr = af.to_ndarray()
-
             if arr.ndim == 2:
                 mono = arr.mean(axis=0).astype(np.int16)
                 chs = arr.shape[0]
@@ -136,10 +166,21 @@ def main():
                 mono = arr.astype(np.int16)
                 chs = 1
             sr = af.sample_rate
-            mono_16k = resample_to_16k(mono, sr)
-            if mono_16k.size > 0 and st.session_state.listener is not None:
-                st.session_state.listener.append_pcm(mono_16k.tobytes())
 
+            # 餵給 WS 後端
+            mono_16k = resample_to_16k(mono, sr)
+            if mono_16k.size > 0:
+                try:
+                    st.session_state.send_q.put_nowait(("audio", mono_16k.tobytes()))
+                except queue.Full:
+                    # 丟棄最舊的，避免堆積（簡單節流）
+                    try:
+                        _ = st.session_state.send_q.get_nowait()
+                    except queue.Empty:
+                        pass
+                    st.session_state.send_q.put_nowait(("audio", mono_16k.tobytes()))
+
+            # 畫圖（與你原本相同）
             sound = pydub.AudioSegment(
                 data=arr.tobytes(),
                 sample_width=af.format.bytes,
@@ -181,13 +222,22 @@ def main():
             ax_freq.set_ylabel("Magnitude")
 
             fig_place.pyplot(fig)
-    else:
-        if st.session_state.listener_running and st.session_state.listener is not None:
+
+        while True:
             try:
-                st.session_state.listener.stop()
-            finally:
-                st.session_state.listener = None
-                st.session_state.listener_running = False
+                evt = st.session_state.recv_q.get_nowait()
+            except queue.Empty:
+                break
+            on_evt(evt)
+
+    else:
+        if st.session_state.ws_running:
+            try:
+                st.session_state.send_q.put_nowait(("end", None))
+            except Exception:
+                pass
+            st.session_state.ws_running = False
+            st.session_state.ws_thread = None
 
     st.divider()
     render_events()
