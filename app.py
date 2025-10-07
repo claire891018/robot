@@ -8,6 +8,9 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from src.listener import Listener
 
+VAD_LEVEL = 3
+SILENCE_MS = 1000
+
 app = FastAPI(title="Listener ASR API", version="0.1.0")
 
 app.add_middleware(
@@ -57,6 +60,8 @@ async def asr_ws(ws: WebSocket):
         sample_rate=sample_rate,  # 16k
         lang=lang,
         source="external",       
+        vad_level=VAD_LEVEL,
+        silence_ms=SILENCE_MS,
     )
     lis.start()
 

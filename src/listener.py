@@ -4,6 +4,7 @@ import numpy as np
 import webrtcvad
 import torch, whisper
 # import sounddevice as sd
+from opencc import OpenCC
 
 SAMPLE_RATE = 16000
 FRAME_MS = 30
@@ -186,8 +187,11 @@ class Listener:
                 return
             audio_f32 = audio_i16 / 32768.0
             result = self._model.transcribe(audio_f32, language=self.lang, fp16=(self.device == "cuda"))
-            print("DEBUG ASR result:", result)
-            text = (result.get("text") or "").strip()
+            # print("DEBUG ASR result:", result)
+            cc = OpenCC('s2t')  # 簡體轉繁體
+            text = cc.convert((result.get("text") or "").strip())
+            print("DEBUG ASR text:", text)
+            # text = (result.get("text") or "").strip()
             segs = result.get("segments", []) or []
             if segs:
                 avg_logprob = float(np.mean([s.get("avg_logprob", -1.0) for s in segs]))
