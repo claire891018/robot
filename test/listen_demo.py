@@ -16,7 +16,7 @@ import websockets
 # sound_window_len = 5000  #
 # sound_window_buffer = None
 
-ASR_WS_URL = st.secrets.get("ASR_WS_URL", "ws://127.0.0.1:10180/asr")
+ASR_WS_URL = st.secrets.get("ASR_WS_URL", "wss://140.116.158.98:10180/asr")
 
 st.set_page_config(
     page_title="Listener Demo",
@@ -28,61 +28,27 @@ logger = logging.getLogger(__name__)
 
 def init_state():
     if "events" not in st.session_state:
-        st.session_state.events = []  # type: List[Dict]
+        st.session_state.events: List[Dict] = []
     if "lock" not in st.session_state:
         st.session_state.lock = threading.Lock()
     if "sound_window_buffer" not in st.session_state:
         st.session_state.sound_window_buffer = None  # pydub.AudioSegment
     if "sound_window_len" not in st.session_state:
-        st.session_state.sound_window_len = 5000  # 5 秒滾動窗
+        st.session_state.sound_window_len = 5000     # 5 秒
 
-    # WebSocket 背景 worker
+    # WebSocket 背景 worker 需要的佇列與旗標（只在主執行緒建立）
+    if "send_q" not in st.session_state:
+        st.session_state.send_q = queue.Queue(maxsize=64)  # 送到後端（音訊）
+    if "recv_q" not in st.session_state:
+        st.session_state.recv_q = queue.Queue()            # 後端回傳事件
     if "ws_thread" not in st.session_state:
         st.session_state.ws_thread = None
-    if "send_q" not in st.session_state:  # 往後端送的音訊（sync queue）
-        st.session_state.send_q: queue.Queue = queue.Queue(maxsize=64)
-    if "recv_q" not in st.session_state:  # 後端回傳的事件（sync queue）
-        st.session_state.recv_q: queue.Queue = queue.Queue()
     if "ws_running" not in st.session_state:
         st.session_state.ws_running = False
-
 
 def on_evt(evt: Dict):
     with st.session_state.lock:
         st.session_state.events.append(evt)
-        
-# === 4) WebSocket 背景 worker：把 sync queue 與 asyncio 溝通起來 ===
-async def asr_loop_async(send_q: queue.Queue, recv_q: queue.Queue):
-    async with websockets.connect(ASR_WS_URL, max_size=2**23) as ws:
-        await ws.send(json.dumps({"type": "start", "sr": 16000, "lang": "zh"}))
-
-        async def reader():
-            try:
-                async for msg in ws:
-                    try:
-                        evt = json.loads(msg)
-                    except Exception:
-                        evt = {"type": "error", "error": "bad_json", "detail": str(msg)}
-                    recv_q.put(evt)
-            except Exception as e:
-                recv_q.put({"type": "error", "error": "ws_reader", "detail": str(e)})
-
-        reader_task = asyncio.create_task(reader())
-
-        try:
-            while True:
-                kind, payload = await asyncio.to_thread(send_q.get)
-                if kind == "audio":
-                    await ws.send(payload)  # bytes = 16k mono s16le
-                elif kind == "end":
-                    await ws.send(json.dumps({"type": "end"}))
-                    break
-        finally:
-            await reader_task
-
-def ws_worker():
-    asyncio.run(asr_loop_async(st.session_state.send_q, st.session_state.recv_q))
-
 
 def resample_to_16k(mono_i16: np.ndarray, sr: int) -> np.ndarray:
     if sr == 16000:
@@ -95,6 +61,39 @@ def resample_to_16k(mono_i16: np.ndarray, sr: int) -> np.ndarray:
     xp = np.linspace(0.0, 1.0, num=n_in, endpoint=False)
     x_new = np.linspace(0.0, 1.0, num=n_out, endpoint=False)
     return np.interp(x_new, xp, x).astype(np.int16)
+
+async def asr_loop_async(send_q: queue.Queue, recv_q: queue.Queue, url: str):
+    async with websockets.connect(url, max_size=2**23) as ws:
+        await ws.send(json.dumps({"type": "start", "sr": 16000, "lang": "zh"}))
+
+        async def reader():
+            try:
+                async for msg in ws:
+                    try:
+                        evt = json.loads(msg)
+                    except Exception:
+                        evt = {"type": "error", "error": "bad_json", "detail": msg}
+                    recv_q.put(evt)
+            except Exception as e:
+                recv_q.put({"type": "error", "error": "ws_reader", "detail": str(e)})
+
+        reader_task = asyncio.create_task(reader())
+
+        # 送音：從同步 queue 阻塞讀取，傳到 WS
+        try:
+            while True:
+                kind, payload = await asyncio.to_thread(send_q.get)
+                if kind == "audio":
+                    await ws.send(payload)  # bytes: 16k mono s16le
+                elif kind == "end":
+                    await ws.send(json.dumps({"type": "end"}))
+                    break
+        finally:
+            await reader_task
+
+def ws_worker(send_q: queue.Queue, recv_q: queue.Queue, url: str):
+    # 注意：這個執行緒完全不碰 st.session_state
+    asyncio.run(asr_loop_async(send_q, recv_q, url))
 
 def render_header():
     icon = "https://api.dicebear.com/9.x/thumbs/svg?"
@@ -137,20 +136,23 @@ def main():
     ctx = webrtc_streamer(
         key="sendonly-audio",
         mode=WebRtcMode.SENDONLY,
-        audio_receiver_size=256,
+        audio_receiver_size=1024,  
         media_stream_constraints={"audio": True},
         async_processing=True,
         rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
     )
 
     if ctx.state.playing and ctx.audio_receiver:
-        # 啟動 WS 背景執行緒（只啟一次）
         if not st.session_state.ws_running:
-            st.session_state.ws_thread = threading.Thread(target=ws_worker, daemon=True)
-            st.session_state.ws_thread.start()
+            t = threading.Thread(
+                target=ws_worker,
+                args=(st.session_state.send_q, st.session_state.recv_q, ASR_WS_URL),
+                daemon=True,
+            )
+            t.start()
+            st.session_state.ws_thread = t
             st.session_state.ws_running = True
 
-        # 取一批 frames → 轉 16k mono → 丟到 send_q
         try:
             audio_frames = ctx.audio_receiver.get_frames(timeout=1)
         except queue.Empty:
@@ -167,20 +169,17 @@ def main():
                 chs = 1
             sr = af.sample_rate
 
-            # 餵給 WS 後端
             mono_16k = resample_to_16k(mono, sr)
             if mono_16k.size > 0:
                 try:
                     st.session_state.send_q.put_nowait(("audio", mono_16k.tobytes()))
                 except queue.Full:
-                    # 丟棄最舊的，避免堆積（簡單節流）
                     try:
                         _ = st.session_state.send_q.get_nowait()
                     except queue.Empty:
                         pass
                     st.session_state.send_q.put_nowait(("audio", mono_16k.tobytes()))
 
-            # 畫圖（與你原本相同）
             sound = pydub.AudioSegment(
                 data=arr.tobytes(),
                 sample_width=af.format.bytes,
