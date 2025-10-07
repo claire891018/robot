@@ -3,7 +3,7 @@ from dataclasses import dataclass, asdict
 import numpy as np
 import webrtcvad
 import torch, whisper
-import sounddevice as sd
+# import sounddevice as sd
 
 SAMPLE_RATE = 16000
 FRAME_MS = 30
