@@ -1,9 +1,5 @@
-import sys
+import sys, json, asyncio, logging, queue, threading, time
 from pathlib import Path
-
-import logging, queue, threading, asyncio, json
-import queue
-import threading
 from typing import List, Dict
 
 import numpy as np
@@ -13,10 +9,7 @@ from streamlit_webrtc import WebRtcMode, webrtc_streamer
 import matplotlib.pyplot as plt
 import websockets
 
-# sound_window_len = 5000  #
-# sound_window_buffer = None
-
-ASR_WS_URL = st.secrets.get("ASR_WS_URL", "wss://140.116.158.98:10180/asr")
+ASR_WS_URL = st.secrets.get("ASR_WS_URL", "ws://140.116.158.98:10180/asr")
 
 st.set_page_config(
     page_title="Listener Demo",
@@ -32,19 +25,19 @@ def init_state():
     if "lock" not in st.session_state:
         st.session_state.lock = threading.Lock()
     if "sound_window_buffer" not in st.session_state:
-        st.session_state.sound_window_buffer = None  # pydub.AudioSegment
+        st.session_state.sound_window_buffer = None
     if "sound_window_len" not in st.session_state:
-        st.session_state.sound_window_len = 5000     # 5 秒
-
-    # WebSocket 背景 worker 需要的佇列與旗標（只在主執行緒建立）
+        st.session_state.sound_window_len = 5000
     if "send_q" not in st.session_state:
-        st.session_state.send_q = queue.Queue(maxsize=64)  # 送到後端（音訊）
+        st.session_state.send_q = queue.Queue(maxsize=64)
     if "recv_q" not in st.session_state:
-        st.session_state.recv_q = queue.Queue()            # 後端回傳事件
+        st.session_state.recv_q = queue.Queue()
     if "ws_thread" not in st.session_state:
         st.session_state.ws_thread = None
     if "ws_running" not in st.session_state:
         st.session_state.ws_running = False
+    if "last_plot" not in st.session_state:
+        st.session_state.last_plot = 0.0
 
 def on_evt(evt: Dict):
     with st.session_state.lock:
@@ -65,7 +58,6 @@ def resample_to_16k(mono_i16: np.ndarray, sr: int) -> np.ndarray:
 async def asr_loop_async(send_q: queue.Queue, recv_q: queue.Queue, url: str):
     async with websockets.connect(url, max_size=2**23) as ws:
         await ws.send(json.dumps({"type": "start", "sr": 16000, "lang": "zh"}))
-
         async def reader():
             try:
                 async for msg in ws:
@@ -76,15 +68,12 @@ async def asr_loop_async(send_q: queue.Queue, recv_q: queue.Queue, url: str):
                     recv_q.put(evt)
             except Exception as e:
                 recv_q.put({"type": "error", "error": "ws_reader", "detail": str(e)})
-
         reader_task = asyncio.create_task(reader())
-
-        # 送音：從同步 queue 阻塞讀取，傳到 WS
         try:
             while True:
                 kind, payload = await asyncio.to_thread(send_q.get)
                 if kind == "audio":
-                    await ws.send(payload)  # bytes: 16k mono s16le
+                    await ws.send(payload)
                 elif kind == "end":
                     await ws.send(json.dumps({"type": "end"}))
                     break
@@ -92,7 +81,6 @@ async def asr_loop_async(send_q: queue.Queue, recv_q: queue.Queue, url: str):
             await reader_task
 
 def ws_worker(send_q: queue.Queue, recv_q: queue.Queue, url: str):
-    # 注意：這個執行緒完全不碰 st.session_state
     asyncio.run(asr_loop_async(send_q, recv_q, url))
 
 def render_header():
@@ -136,7 +124,7 @@ def main():
     ctx = webrtc_streamer(
         key="sendonly-audio",
         mode=WebRtcMode.SENDONLY,
-        audio_receiver_size=1024,  
+        audio_receiver_size=2048,
         media_stream_constraints={"audio": True},
         async_processing=True,
         rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
@@ -153,10 +141,12 @@ def main():
             st.session_state.ws_thread = t
             st.session_state.ws_running = True
 
-        try:
-            audio_frames = ctx.audio_receiver.get_frames(timeout=1)
-        except queue.Empty:
-            audio_frames = []
+        audio_frames = []
+        while True:
+            try:
+                audio_frames.extend(ctx.audio_receiver.get_frames(timeout=0))
+            except queue.Empty:
+                break
 
         sound_chunk = pydub.AudioSegment.empty()
         for af in audio_frames:
@@ -201,26 +191,25 @@ def main():
         if swb and len(swb) > 0:
             swb = swb.set_channels(1)
             sample = np.array(swb.get_array_of_samples())
-
             ax_time.cla()
             times = (np.arange(-len(sample), 0)) / swb.frame_rate
             ax_time.plot(times, sample)
             ax_time.set_xlabel("Time")
             ax_time.set_ylabel("Magnitude")
-
             spec = np.fft.fft(sample)
             freq = np.fft.fftfreq(sample.shape[0], 1.0 / swb.frame_rate)
             freq = freq[: int(freq.shape[0] / 2)]
             spec = spec[: int(spec.shape[0] / 2)]
             spec[0] = spec[0] / 2
-
             ax_freq.cla()
             ax_freq.plot(freq, np.abs(spec))
             ax_freq.set_xlabel("Frequency")
             ax_freq.set_yscale("log")
             ax_freq.set_ylabel("Magnitude")
-
-            fig_place.pyplot(fig)
+            now = time.time()
+            if now - st.session_state.last_plot >= 0.25:
+                fig_place.pyplot(fig)
+                st.session_state.last_plot = now
 
         while True:
             try:
