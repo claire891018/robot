@@ -30,6 +30,7 @@ async def asr_ws(ws: WebSocket):
     sample_rate = 16000
     lang = "zh"
     try:
+        print("Waiting for start message...")
         first = await ws.receive_text()
         try:
             data = json.loads(first)
@@ -47,6 +48,7 @@ async def asr_ws(ws: WebSocket):
     ev_q: asyncio.Queue = asyncio.Queue()
 
     loop = asyncio.get_running_loop()
+    
     def on_evt(evt: dict):
         loop.call_soon_threadsafe(ev_q.put_nowait, evt)
 
@@ -76,6 +78,7 @@ async def asr_ws(ws: WebSocket):
     try:
         while True:
             msg = await ws.receive()
+            print("DEBUG: got ws msg", msg)
             if "type" in msg and msg["type"] == "websocket.disconnect":
                 break
 
