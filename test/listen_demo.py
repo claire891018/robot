@@ -15,7 +15,7 @@ from src.listener import Listener
 # sound_window_buffer = None
 
 st.set_page_config(
-    page_title="Listener WebRTC Demo",
+    page_title="Listener Demo",
     page_icon="https://api.dicebear.com/9.x/thumbs/svg?",
     layout="wide",
 )
