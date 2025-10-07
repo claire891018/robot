@@ -1,17 +1,17 @@
 import threading, time, queue
 from dataclasses import dataclass, asdict
 import numpy as np
-import sounddevice as sd
 import webrtcvad
 import torch, whisper
+import sounddevice as sd
 
 SAMPLE_RATE = 16000
 FRAME_MS = 30
 VAD_LEVEL = 2
 SILENCE_MS = 700
 MAX_UTTER_SEC = 15
-LANG = "zh"
-MODEL_NAME = "large-v3"
+LANG = "zh-tw"
+MODEL_NAME = "medium" # "large-v3"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 MIN_CONFIDENCE = 0.6
 
@@ -44,8 +44,10 @@ class Listener:
                 lang=LANG,
                 model_name=MODEL_NAME,
                 device=DEVICE,
-                min_conf=MIN_CONFIDENCE
+                min_conf=MIN_CONFIDENCE,
+                source="mic"
             ):
+        print(f"Listener init: device={device} model={model_name} source={source}")
         self.on_utterance = on_utterance
         self.input_device = input_device
         self.sample_rate = sample_rate
@@ -57,10 +59,12 @@ class Listener:
         self.model_name = model_name
         self.device = device
         self.min_conf = min_conf
+        self.source = source
 
         self._audio_stream = None
         self._run = threading.Event()
         self._buffer = bytearray()
+        self._buf_lock = threading.Lock()
         self._q = queue.Queue()
         self._start_wall_ts = None
 
@@ -82,7 +86,8 @@ class Listener:
             return
         self._run.set()
         self._start_wall_ts = time.time()
-        self._open_stream()
+        if self.source == "mic":
+            self._open_stream()
         self._worker = threading.Thread(target=self._loop, daemon=True)
         self._worker.start()
 
@@ -95,6 +100,8 @@ class Listener:
             except Exception:
                 pass
             self._audio_stream = None
+        if self._worker and self._worker.is_alive():
+            self._worker.join(timeout=1.0)
 
     def running(self):
         return self._run.is_set()
@@ -106,13 +113,24 @@ class Listener:
         except queue.Empty:
             return None
 
+    def append_pcm(self, pcm_bytes: bytes):
+        if not pcm_bytes:
+            return
+        with self._buf_lock:
+            self._buffer.extend(pcm_bytes)
+
     def _open_stream(self):
+        if sd is None:
+            self._emit_error("audio_backend_missing", "sounddevice not available")
+            return
+
         def _cb(indata, frames, time_info, status):
             if status:
                 self._emit_error("audio_status", detail=str(status))
             mono = indata[:, 0] if indata.ndim > 1 else indata
             mono_i16 = (np.clip(mono, -1.0, 1.0) * 32767.0).astype(np.int16)
-            self._buffer.extend(mono_i16.tobytes())
+            with self._buf_lock:
+                self._buffer.extend(mono_i16.tobytes())
 
         self._audio_stream = sd.InputStream(
             device=self.input_device,
@@ -127,9 +145,13 @@ class Listener:
     def _loop(self):
         while self._run.is_set():
             now_ts = time.time() - self._start_wall_ts
-            while len(self._buffer) >= self._frame_bytes:
-                frame = self._buffer[:self._frame_bytes]
-                self._buffer = self._buffer[self._frame_bytes:]
+            with self._buf_lock:
+                enough = len(self._buffer) >= self._frame_bytes
+            while enough:
+                with self._buf_lock:
+                    frame = self._buffer[:self._frame_bytes]
+                    self._buffer = self._buffer[self._frame_bytes:]
+                    enough = len(self._buffer) >= self._frame_bytes
                 try:
                     is_speech = self._vad.is_speech(frame, self.sample_rate)
                 except Exception as e:
@@ -164,6 +186,7 @@ class Listener:
                 return
             audio_f32 = audio_i16 / 32768.0
             result = self._model.transcribe(audio_f32, language=self.lang, fp16=(self.device == "cuda"))
+            print("DEBUG ASR result:", result)
             text = (result.get("text") or "").strip()
             segs = result.get("segments", []) or []
             if segs:
