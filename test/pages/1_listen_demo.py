@@ -12,9 +12,9 @@ import websockets
 from PIL import Image
 
 try:
-    ASR_WS_URL = st.secrets.get("ASR_WS_URL", "ws://127.0.0.1:9999/asr")
+    ASR_WS_URL = st.secrets.get("ASR_WS_URL", "ws://140.116.158.98:9999/asr")
 except Exception:
-    ASR_WS_URL = "ws://127.0.0.1:9999/asr"
+    ASR_WS_URL = "ws://140.116.158.98:9999/asr"
 
 st.set_page_config(
     page_title="Listener Demo",

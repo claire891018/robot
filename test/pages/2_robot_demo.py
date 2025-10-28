@@ -12,9 +12,9 @@ st.set_page_config(
 
 def get_ws_url():
     try:
-        return st.secrets.get("API_WS", "ws://127.0.0.1:9999/brain/ws")
+        return st.secrets.get("API_WS", "ws://140.116.158.98:9999/brain/ws")
     except Exception:
-        return "ws://127.0.0.1:9999/brain/ws"
+        return "ws://140.116.158.98:9999/brain/ws"
 
 def resample_to_16k(mono_i16: np.ndarray, sr: int) -> np.ndarray:
     if sr == 16000: return mono_i16.astype(np.int16, copy=False)
