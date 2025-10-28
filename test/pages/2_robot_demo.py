@@ -4,6 +4,12 @@ import streamlit as st
 from PIL import Image
 from streamlit_webrtc import webrtc_streamer, WebRtcMode
 
+st.set_page_config(
+    page_title="Robot Demo",
+    page_icon="https://api.dicebear.com/9.x/thumbs/svg?seed=Brian",
+    layout="wide",
+)
+
 def get_ws_url():
     try:
         return st.secrets.get("API_WS", "ws://127.0.0.1:9999/brain/ws")
