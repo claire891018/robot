@@ -192,7 +192,7 @@ def main():
     colL, colR = st.columns([2,1])
     
     with colL:
-        st.subheader("🎥 視覺串流")
+        st.subheader("視覺串流")
         st.slider("推理間隔(幀)", 1, 20, key="infer_every")
         ctx = webrtc_streamer(
             key="av",
@@ -224,22 +224,22 @@ def main():
                     st.session_state.last_audio_time = time.time()
     
     with colR:
-        st.subheader("🧠 大腦輸出")
+        st.subheader("後端輸出")
         
         with st.container(border=True):
-            st.markdown("### 🎤 音訊狀態")
+            st.markdown("### 音訊狀態")
             audio_count = st.session_state.get("audio_recv_count", 0)
             last_audio = st.session_state.get("last_audio_time")
             
             if last_audio and (time.time() - last_audio) < 1.0:
-                st.success(f"✅ 正在接收音訊 (已接收 {audio_count} 幀)")
+                st.success(f"正在接收音訊 (已接收 {audio_count} 幀)")
             elif audio_count > 0:
-                st.warning(f"⚠️ 音訊暫停 (已接收 {audio_count} 幀)")
+                st.warning(f"音訊暫停 (已接收 {audio_count} 幀)")
             else:
                 st.info("⏸️ 等待音訊輸入...")
         
         with st.container(border=True):
-            st.markdown("### 💬 語音識別")
+            st.markdown("### 語音識別")
             
             with st.session_state.lock:
                 asr_hist = st.session_state.asr_history.copy()
@@ -261,7 +261,7 @@ def main():
                             st.caption(f"   置信度: {item['confidence']:.2%}")
         
         with st.container(border=True):
-            st.markdown("### 👁️ 視覺與控制")
+            st.markdown("### 視覺與控制")
             with st.session_state.lock:
                 s = st.session_state.shared.copy()
             
