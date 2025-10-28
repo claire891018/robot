@@ -53,7 +53,7 @@ async def _asr_writer(ws: WebSocket, running_flag, tag: str):
                 txt = (evt.get("text") or "").strip()
                 conf = evt.get("confidence")
                 print(f"[ASR->{tag}] #{stats['utterances']} text='{txt}' conf={None if conf is None else round(conf,3)} "
-                      f"len={evt.get('meta',{}).get('audio_len_sec')}")
+                    f"len={evt.get('meta',{}).get('audio_len_sec')}")
             elif t == "error":
                 print(f"[ASR_ERR->{tag}] {evt.get('error')} detail={evt.get('detail')}")
             try:
@@ -138,6 +138,7 @@ async def asr_ws(ws: WebSocket):
     try:
         while True:
             msg = await ws.receive()
+            print("DEBUG: got ws msg", msg)
             if msg.get("type") == "websocket.disconnect":
                 print(f"[WS/asr] disconnect #{ws_id}")
                 break
