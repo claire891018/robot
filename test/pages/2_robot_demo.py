@@ -133,12 +133,23 @@ class VideoProcessor:
         if instr:
             cv2.putText(img, f"instr={instr}", (10,106), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200,200,200), 2)
         return av.VideoFrame.from_ndarray(img, format="bgr24")
+    
+def render_header():
+    icon = "https://api.dicebear.com/9.x/thumbs/svg?seed=Brian"
+    st.markdown(
+        f'''
+        <h2 style="display:flex;align-items:center;gap:.5rem;">
+          <img src="{icon}" width="28" height="28" style="border-radius:20%; display:block;" />
+          Robot Demo
+        </h2>
+        ''',
+        unsafe_allow_html=True,
+    )
 
 def main():
-    st.set_page_config(page_title="Robot Demo", page_icon="🤖", layout="wide")
     _init_state()
     ws_url = get_ws_url()
-
+    render_header()
     colL, colR = st.columns([2,1])
     with colL:
         st.subheader("視覺串流")

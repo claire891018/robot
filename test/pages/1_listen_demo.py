@@ -80,11 +80,18 @@ def ws_worker(send_q: queue.Queue, recv_q: queue.Queue, url: str):
     asyncio.run(asr_loop_async(send_q, recv_q, url))
 
 def render_header():
+    icon = "https://api.dicebear.com/9.x/thumbs/svg?"
     st.markdown(
-        '<h2 style="display:flex;align-items:center;gap:.5rem;">🎙️ Listener Demo</h2>',
+        f'''
+        <h2 style="display:flex;align-items:center;gap:.5rem;">
+          <img src="{icon}" width="28" height="28" style="border-radius:20%; display:block;" />
+          Listener Demo
+        </h2>
+        ''',
         unsafe_allow_html=True,
     )
     st.caption("點擊 START 開始說話。此頁僅作語音 Demo。")
+
 
 def render_events(container):
     with container.container():
