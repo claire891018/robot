@@ -124,6 +124,41 @@ async def asr_ws(ws: WebSocket):
         except Exception:
             pass
         
+@app.websocket("/brain/ws")
+async def brain_ws(ws: WebSocket):
+    await ws.accept()
+    try:
+        while True:
+            msg = await ws.receive()
+            if "type" in msg and msg["type"] == "websocket.disconnect":
+                break
+            if "bytes" in msg and msg["bytes"] is not None:
+                b = msg["bytes"]
+                if len(b)>=4 and b[:4]==b"AUD0":
+                    brain.append_audio_pcm(b[4:])
+                    await ws.send_text(json.dumps({"type":"asr_ack"}))
+                else:
+                    out = brain.observe_frame(b)
+                    await ws.send_text(json.dumps({"type":"observe", **out}))
+            elif "text" in msg and msg["text"] is not None:
+                try:
+                    data = json.loads(msg["text"])
+                    t = data.get("type")
+                    if t=="pose":
+                        brain.update_pose(data.get("pose", {}))
+                        await ws.send_text(json.dumps({"type":"pose_ack"}))
+                    elif t=="end":
+                        break
+                    else:
+                        await ws.send_text(json.dumps({"type":"error","error":"unknown_text"}))
+                except Exception:
+                    await ws.send_text(json.dumps({"type":"error","error":"bad_text_json"}))
+    except WebSocketDisconnect:
+        pass
+    finally:
+        try: await ws.close()
+        except Exception: pass        
+        
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=9999, factory=False)  

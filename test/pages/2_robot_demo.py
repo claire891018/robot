@@ -1,176 +1,175 @@
-# pages/2_robot_demo.py
-import base64, io, threading, time
-import numpy as np
-import cv2
-from PIL import Image
-import requests
+import asyncio, threading, json, io, base64
+import numpy as np, cv2, av, websockets, requests
 import streamlit as st
+from PIL import Image
 from streamlit_webrtc import webrtc_streamer, WebRtcMode
-import av
 
-def get_api_base() -> str:
+def get_ws_url():
     try:
-        return st.secrets.get("API_BASE", "http://140.116.158.98:9999")
+        return st.secrets.get("API_WS", "ws://140.116.158.98:9999/brain/ws")
     except Exception:
-        return "http://140.116.158.98:9999"
+        return "ws://140.116.158.98:9999/brain/ws"
 
 def render_header():
     icon = "https://api.dicebear.com/9.x/thumbs/svg?seed=Brian"
-    st.markdown(
-        f'''
-        <h2 style="display:flex;align-items:center;gap:.5rem;">
-        <img src="{icon}" width="28" height="28"
-            style="border-radius:20%; display:block;" />
-        Robot Demo
-        </h2>
-        ''',
-        unsafe_allow_html=True,
-    )
+    st.set_page_config(page_title="Robot Demo", page_icon=icon, layout="wide")
+    st.markdown(f'''<h2 style="display:flex;align-items:center;gap:.5rem;">
+    <img src="{icon}" width="28" height="28" style="border-radius:20%; display:block;" />
+    Robot Demo（同頁：音訊+影像 → /brain/ws）
+    </h2>''', unsafe_allow_html=True)
 
-def to_b64(frame_bgr: np.ndarray) -> str:
+def resample_to_16k(mono_i16: np.ndarray, sr: int) -> np.ndarray:
+    if sr == 16000: return mono_i16.astype(np.int16, copy=False)
+    x = mono_i16.astype(np.float32); n_in = x.shape[-1]
+    n_out = int(round(n_in * 16000 / sr))
+    if n_out <= 0 or n_in <= 1: return np.zeros(0, dtype=np.int16)
+    xp = np.linspace(0.0, 1.0, num=n_in, endpoint=False)
+    x_new = np.linspace(0.0, 1.0, num=n_out, endpoint=False)
+    return np.interp(x_new, xp, x).astype(np.int16)
+
+def jpeg_bytes(frame_bgr: np.ndarray) -> bytes:
     im = Image.fromarray(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB))
-    buf = io.BytesIO()
-    im.save(buf, format="JPEG", quality=90)
-    return base64.b64encode(buf.getvalue()).decode("utf-8")
+    buf = io.BytesIO(); im.save(buf, format="JPEG", quality=85)
+    return buf.getvalue()
 
-def infer_and_control(frame_bgr: np.ndarray, api_base: str, instr: str, pose, shared, lock, show_json: bool, send_control: bool, place_json, place_ctrl):
-    try:
-        b64 = to_b64(frame_bgr)
-        r = requests.post(f"{api_base}/vision/infer",
-                          json={"image_b64": b64, "instruction": instr},
-                          timeout=30)
-        r.raise_for_status()
-        p = r.json()
-        with lock:
-            shared["bbox"] = tuple(p["bbox"]) if p.get("bbox") else None
-            shared["depth_m"] = p.get("depth_m")
-            shared["intent"] = p.get("intent")
-            shared["target"] = p.get("target")
-            shared["rel_dir"] = p.get("rel_dir")
-            shared["dist_label"] = p.get("dist_label")
-        if show_json:
-            place_json.json(p)
-
-        if send_control:
-            payload = {"pose": pose, "perception": p}
-            r2 = requests.post(f"{api_base}/brain/step", json=payload, timeout=15)
-            r2.raise_for_status()
-            c = r2.json()
-            with lock:
-                shared["last_ctrl"] = (float(c.get("v", 0.0)), float(c.get("w", 0.0)))
-            place_ctrl.success(f"控制量 v={c.get('v',0.0):.3f}, w={c.get('w',0.0):.3f}")
-    except Exception as e:
-        place_ctrl.error(f"推理/控制錯誤：{e}")
-
-def make_video_processor(infer_every_getter, api_base_getter, instr_getter, pose_getter, shared, lock, ui_refs):
-    class VideoProcessor:
-        def __init__(self):
-            self._cnt = 0
-        def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
-            img = frame.to_ndarray(format="bgr24")
-            self._cnt += 1
-            if self._cnt % int(max(1, infer_every_getter())) == 0:
-                threading.Thread(
-                    target=infer_and_control,
-                    args=(
-                        img.copy(),
-                        api_base_getter(),
-                        instr_getter(),
-                        pose_getter(),
-                        shared,
-                        lock,
-                        ui_refs["show_json"](),
-                        ui_refs["send_control"](),
-                        ui_refs["place_json"],
-                        ui_refs["place_ctrl"],
-                    ),
-                    daemon=True,
-                ).start()
-
-            with lock:
-                bbox = shared["bbox"]
-                depth_m = shared["depth_m"]
-                intent = shared["intent"]
-                target = shared["target"]
-                rel_dir = shared["rel_dir"]
-                dist_label = shared["dist_label"]
-                last_ctrl = shared["last_ctrl"]
-
-            if bbox:
-                x1, y1, x2, y2 = bbox
-                cv2.rectangle(img, (x1,y1), (x2,y2), (0,255,0), 2)
-            txt1 = f"intent={intent} target={target} rel={rel_dir} dist_label={dist_label}"
-            txt2 = f"depth_m={None if depth_m is None else round(depth_m,2)}"
-            cv2.putText(img, txt1, (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,255), 2, cv2.LINE_AA)
-            cv2.putText(img, txt2, (10, 54), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,255), 2, cv2.LINE_AA)
-            if last_ctrl:
-                cv2.putText(img, f"v={last_ctrl[0]:.2f}, w={last_ctrl[1]:.2f}", (10, 80),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,0), 2, cv2.LINE_AA)
-            return av.VideoFrame.from_ndarray(img, format="bgr24")
-    return VideoProcessor
+async def ws_loop(send_q: asyncio.Queue, recv_q: asyncio.Queue, ws_url: str):
+    async with websockets.connect(ws_url, max_size=2**24) as ws:
+        async def sender():
+            while True:
+                kind, payload = await send_q.get()
+                if kind == "end":
+                    await ws.send(json.dumps({"type":"end"})); break
+                if kind == "bytes":
+                    await ws.send(payload)
+                elif kind == "text":
+                    await ws.send(json.dumps(payload))
+        async def receiver():
+            async for msg in ws:
+                try:
+                    data = json.loads(msg)
+                except Exception:
+                    data = {"type":"raw", "value": msg}
+                await recv_q.put(data)
+        task_s = asyncio.create_task(sender())
+        task_r = asyncio.create_task(receiver())
+        await asyncio.gather(task_s, task_r)
 
 def main():
-    st.set_page_config(
-        page_title="Robot Demo",
-        page_icon="https://api.dicebear.com/9.x/thumbs/svg?seed=Brian",
-        layout="wide",
-    )
     render_header()
-
-    api_base = get_api_base()
-    instr = st.text_input("指令", value="請定位目標並估距離")
+    ws_url = get_ws_url()
 
     pose_col = st.columns(3)
-    x = pose_col[0].number_input("x", value=0.0, step=0.1)
-    y = pose_col[1].number_input("y", value=0.0, step=0.1)
-    theta = pose_col[2].number_input("theta", value=0.0, step=0.1)
+    v_x = pose_col[0].number_input("x", value=0.0, step=0.1)
+    v_y = pose_col[1].number_input("y", value=0.0, step=0.1)
+    v_th = pose_col[2].number_input("theta", value=0.0, step=0.1)
 
     row = st.columns(3)
     infer_every = row[0].number_input("每幀間隔(推理頻率)", value=5, min_value=1, max_value=30, step=1)
-    send_control_t = row[1].toggle("送出控制量 (/brain/step)", value=True)
-    show_json_t = row[2].toggle("顯示推理 JSON", value=False)
+    show_json = row[1].toggle("顯示 JSON", value=False)
+    pose_every_s = row[2].number_input("姿態上傳秒數", value=1.0, min_value=0.1, max_value=5.0, step=0.1)
+
+    if "ws_started" not in st.session_state:
+        st.session_state.ws_started = False
+        st.session_state.loop = asyncio.new_event_loop()
+        st.session_state.send_q = asyncio.Queue()
+        st.session_state.recv_q = asyncio.Queue()
+        st.session_state.shared = {"bbox":None,"depth_m":None,"intent":None,"target":None,"rel_dir":None,"dist_label":None,"last_ctrl":None,"instruction":""}
+        st.session_state.lock = threading.Lock()
+        st.session_state.last_pose_ts = 0.0
 
     place_json = st.empty()
     place_ctrl = st.empty()
+    place_asr = st.empty()
 
-    if "shared" not in st.session_state:
-        st.session_state.shared = {
-            "bbox": None,
-            "depth_m": None,
-            "intent": None,
-            "target": None,
-            "rel_dir": None,
-            "dist_label": None,
-            "last_ctrl": None,
-        }
-    if "lock" not in st.session_state:
-        st.session_state.lock = threading.Lock()
+    def start_ws_once():
+        if not st.session_state.ws_started:
+            threading.Thread(target=lambda: st.session_state.loop.run_until_complete(ws_loop(st.session_state.send_q, st.session_state.recv_q, ws_url)), daemon=True).start()
+            st.session_state.ws_started = True
 
-    VideoProcessor = make_video_processor(
-        infer_every_getter=lambda: infer_every,
-        api_base_getter=lambda: api_base,
-        instr_getter=lambda: instr,
-        pose_getter=lambda: {"x": x, "y": y, "theta": theta},
-        shared=st.session_state.shared,
-        lock=st.session_state.lock,
-        ui_refs={
-            "show_json": lambda: show_json_t,
-            "send_control": lambda: send_control_t,
-            "place_json": place_json,
-            "place_ctrl": place_ctrl,
-        },
-    )
+    def enqueue(kind, payload):
+        st.session_state.loop.call_soon_threadsafe(asyncio.create_task, st.session_state.send_q.put((kind, payload)))
 
-    webrtc_streamer(
-        key="robot-webrtc",
+    class VideoProcessor:
+        def __init__(self):
+            self._cnt = 0
+            start_ws_once()
+        def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
+            img = frame.to_ndarray(format="bgr24")
+            self._cnt += 1
+            import time as _t
+            if _t.time() - st.session_state.last_pose_ts >= pose_every_s:
+                enqueue("text", {"type":"pose","pose":{"x":float(v_x),"y":float(v_y),"theta":float(v_th)}})
+                st.session_state.last_pose_ts = _t.time()
+            if self._cnt % int(max(1, infer_every)) == 0:
+                enqueue("bytes", jpeg_bytes(img.copy()))
+            got = 0
+            while True:
+                try:
+                    data = st.session_state.recv_q.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                got += 1
+                if show_json: place_json.json(data)
+                if data.get("type") == "observe":
+                    p = data
+                    with st.session_state.lock:
+                        st.session_state.shared["bbox"] = tuple(p["bbox"]) if p.get("bbox") else None
+                        st.session_state.shared["depth_m"] = p.get("depth_m")
+                        st.session_state.shared["intent"] = p.get("intent")
+                        st.session_state.shared["target"] = p.get("target")
+                        st.session_state.shared["rel_dir"] = p.get("rel_dir")
+                        st.session_state.shared["dist_label"] = p.get("dist_label")
+                        st.session_state.shared["instruction"] = p.get("instruction","")
+                        c = p.get("control") or {}
+                        st.session_state.shared["last_ctrl"] = (float(c.get("v",0.0)), float(c.get("w",0.0)))
+                        if c: place_ctrl.success(f"v={c.get('v',0.0):.3f}  w={c.get('w',0.0):.3f}")
+                elif data.get("type") == "utterance":
+                    place_asr.info(f"語音：{data.get('text','')}")
+            with st.session_state.lock:
+                bbox = st.session_state.shared["bbox"]
+                depth_m = st.session_state.shared["depth_m"]
+                intent = st.session_state.shared["intent"]
+                target = st.session_state.shared["target"]
+                rel_dir = st.session_state.shared["rel_dir"]
+                dist_label = st.session_state.shared["dist_label"]
+                last_ctrl = st.session_state.shared["last_ctrl"]
+                instr = st.session_state.shared["instruction"]
+            if bbox:
+                x1,y1,x2,y2 = bbox
+                cv2.rectangle(img,(x1,y1),(x2,y2),(0,255,0),2)
+            cv2.putText(img, f"intent={intent} target={target} rel={rel_dir} dist={dist_label}", (10,28), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,255), 2)
+            cv2.putText(img, f"depth_m={None if depth_m is None else round(depth_m,2)}", (10,54), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,255), 2)
+            if last_ctrl:
+                cv2.putText(img, f"v={last_ctrl[0]:.2f} w={last_ctrl[1]:.2f}", (10,80), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,0), 2)
+            if instr:
+                cv2.putText(img, f"instr={instr}", (10,106), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200,200,200), 2)
+            return av.VideoFrame.from_ndarray(img, format="bgr24")
+
+    ctx = webrtc_streamer(
+        key="av-sendrecv",
         mode=WebRtcMode.SENDRECV,
-        media_stream_constraints={"video": True, "audio": False},
+        media_stream_constraints={"video": True, "audio": True},
         video_processor_factory=VideoProcessor,
         async_processing=True,
-        rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
+        rtc_configuration={"iceServers":[{"urls":["stun:stun.l.google.com:19302"]}]},
     )
 
-    # st.info("提示：`API_BASE` 請設為 http 後端，例如 `http://<SERVER>:9999`；此頁會持續開著相機、每 N 幀推理。")
+    if ctx.state.playing and ctx.audio_receiver:
+        try:
+            audio_frames = ctx.audio_receiver.get_frames(timeout=1)
+        except Exception:
+            audio_frames = []
+        for af in audio_frames:
+            arr = af.to_ndarray()
+            if arr.ndim == 2:
+                mono = arr.mean(axis=0).astype(np.int16)
+            else:
+                mono = arr.astype(np.int16)
+            sr = af.sample_rate
+            pcm16 = resample_to_16k(mono, sr).tobytes()
+            enqueue("bytes", b"AUD0" + pcm16)
+
+    st.caption("左側麥克風與鏡頭同時啟動：音訊以 AUD0 前綴送 /brain/ws，影像每 N 幀送 JPEG，姿態定期送出，伺服器回 observe 結果即時疊在畫面。")
 
 if __name__ == "__main__":
     main()
