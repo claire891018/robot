@@ -32,7 +32,7 @@ class Brain:
                 if new_text != self.last_instruction:
                     self.last_instruction = new_text
                     self._new_instruction = True
-                    print(f"[BRAIN] 🎤 新指令: '{new_text}' (標記需要視覺推理)")
+                    print(f"[BRAIN] 新指令: '{new_text}' (標記需要視覺推理)")
 
     def append_audio_pcm(self, pcm_bytes: bytes):
         self.listener.append_pcm(pcm_bytes)
@@ -52,11 +52,11 @@ class Brain:
         frame = _jpeg_to_bgr(jpeg_bytes)
         
         if need_mllm or not self._last_perception:
-            print(f"[BRAIN] 👁️ 執行視覺推理 (指令: '{instr}')")
+            print(f"[BRAIN] 執行視覺推理 (指令: '{instr}')")
             p: Perception = self.vision.perceive(frame, instr)
             self._last_perception = p
         else:
-            print(f"[BRAIN] ♻️ 重用視覺結果 (指令: '{instr}')")
+            print(f"[BRAIN] 重用視覺結果 (指令: '{instr}')")
             p = self._last_perception
         
         guide = self._guide_from_bbox(frame, p)

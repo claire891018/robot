@@ -43,6 +43,7 @@ def pose_get():
 
 async def _asr_writer(ws: WebSocket, running_flag, tag: str):
     try:
+        print(f"[ASR_WRITER]")
         while running_flag["on"]:
             evt = await asyncio.to_thread(brain.listener.get, 0.2)
             if not evt:
