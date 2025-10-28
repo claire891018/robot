@@ -1,5 +1,5 @@
 import base64
-import os, io, json, re, math, requests
+import os, io, json, re, math, requests, time, hashlib
 import numpy as np, cv2
 from PIL import Image
 from typing import Optional, Tuple, Dict, Any
@@ -46,6 +46,10 @@ def _json_loose(s: str) -> Optional[Dict[str, Any]]:
     except:
         return None
 
+def _frame_hash(img: np.ndarray) -> str:
+    small = cv2.resize(img, (64, 64))
+    return hashlib.md5(small.tobytes()).hexdigest()[:16]
+
 class DepthEstimator:
     def __init__(self, mode: str = "midas"):
         self.mode = (mode or "midas").lower()
@@ -83,7 +87,10 @@ class Vision:
         self.model = mllm_model or OLLAMA_MODEL
         self.depth = depth_model or DepthEstimator(DEPTH_MODE)
         self.focal_px = 0.5 * FRAME_WIDTH / math.tan(math.radians(FOV_DEG/2))
-        print("[Vision] using model:", self.model, "depth_mode:", DEPTH_MODE)
+        self._cache = {}
+        self._cache_ttl = 2.0
+        self._last_frame_hash = None
+        self._last_instruction = None
 
     def _endpoints(self):
         base = OLLAMA_URL.rstrip("/")
@@ -95,23 +102,56 @@ class Vision:
             gen = base + "/api/generate"
         return chat, gen
 
+    def _should_skip_mllm(self, frame_hash: str, instruction: str) -> bool:
+        if not instruction:
+            return True
+        if frame_hash == self._last_frame_hash and instruction == self._last_instruction:
+            cache_key = f"{frame_hash}:{instruction}"
+            if cache_key in self._cache:
+                cached_time, _ = self._cache[cache_key]
+                if time.time() - cached_time < self._cache_ttl:
+                    return True
+        return False
+
+    def _get_cached(self, frame_hash: str, instruction: str) -> Optional[Dict[str, Any]]:
+        cache_key = f"{frame_hash}:{instruction}"
+        if cache_key in self._cache:
+            cached_time, result = self._cache[cache_key]
+            if time.time() - cached_time < self._cache_ttl:
+                return result
+        return None
+
+    def _set_cache(self, frame_hash: str, instruction: str, result: Dict[str, Any]):
+        cache_key = f"{frame_hash}:{instruction}"
+        self._cache[cache_key] = (time.time(), result)
+        if len(self._cache) > 10:
+            oldest = min(self._cache.items(), key=lambda x: x[1][0])
+            del self._cache[oldest[0]]
+
     def _ask_mllm(self, frame_bgr: np.ndarray, instruction: str, H: int, W: int) -> Dict[str, Any]:
+        frame_hash = _frame_hash(frame_bgr)
+        
+        if not instruction:
+            return {"intent": "observe", "target": "", "rel_dir": None, "dist_label": None, "bbox": None}
+        
+        cached = self._get_cached(frame_hash, instruction)
+        if cached:
+            return cached
+        
         b64 = _jpeg_b64_from_bgr(frame_bgr)
         chat_url, gen_url = self._endpoints()
-        sys = """你是多模態導航助理。
-        僅以 JSON 回答，鍵: intent,target,rel_dir,dist_label,bbox。bbox=[x1,y1,x2,y2] 或 null。
-        intent 取 navigate/chat/control。dist_label 取 near/mid/far 或 null。"""
+        sys = "你是多模態導航助理。僅以 JSON 回答，鍵: intent,target,rel_dir,dist_label,bbox。bbox=[x1,y1,x2,y2] 或 null。intent 取 navigate/chat/control。dist_label 取 near/mid/far 或 null。"
         user = f"指令: {instruction}\n請輸出 JSON。"
         try:
             p = {"model": self.model, "messages": [{"role":"system","content":sys},{"role":"user","content":user,"images":[b64]}], "stream": False}
-            r = requests.post(chat_url, json=p, timeout=60)
+            r = requests.post(chat_url, json=p, timeout=10)
             r.raise_for_status()
             content = r.json().get("message", {}).get("content", "") or ""
             j = _json_loose(content) or {}
         except:
             try:
                 pr = {"model": self.model, "prompt": sys + "\n" + user, "images": [b64], "stream": False}
-                r2 = requests.post(gen_url, json=pr, timeout=60)
+                r2 = requests.post(gen_url, json=pr, timeout=10)
                 r2.raise_for_status()
                 content = r2.json().get("response", "") or ""
                 j = _json_loose(content) or {}
@@ -128,7 +168,13 @@ class Vision:
         else:
             bbox = None
         if not rel_dir: rel_dir = _rel_dir_from_bbox(W, bbox)
-        return {"intent": intent, "target": target, "rel_dir": rel_dir, "dist_label": dist_label, "bbox": bbox}
+        
+        result = {"intent": intent, "target": target, "rel_dir": rel_dir, "dist_label": dist_label, "bbox": bbox}
+        self._set_cache(frame_hash, instruction, result)
+        self._last_frame_hash = frame_hash
+        self._last_instruction = instruction
+        
+        return result
 
     def _depth_from_map(self, frame_bgr: np.ndarray, bbox: Optional[Tuple[int,int,int,int]]) -> Optional[float]:
         dm = self.depth.predict(frame_bgr)

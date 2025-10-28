@@ -47,7 +47,7 @@ class Listener:
                 device=DEVICE,
                 min_conf=MIN_CONFIDENCE,
                 source="external"):
-        print(f"Listener init: device={device} model={model_name} source={source}")
+        print(f"[Listener] device={device} model={model_name} source={source}")
         self.on_utterance = on_utterance
         self.sample_rate = sample_rate
         self.frame_ms = frame_ms
