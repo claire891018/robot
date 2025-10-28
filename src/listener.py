@@ -74,7 +74,7 @@ class Listener:
         self._silence_count = 0
         self._utt_start_ts = None
         self._model = whisper.load_model(self.model_name, device=self.device)
-        self.cc = OpenCC('s2t')
+        self._cc = OpenCC('s2t')
         self._lead_frames = int(LEAD_MS / self.frame_ms)
         self._tail_frames = int(TAIL_MS / self.frame_ms)
         self._prev_frames = []
@@ -173,7 +173,7 @@ class Listener:
                 condition_on_previous_text=False,
                 beam_size=5
             )
-            text = self.cc.convert((result.get("text") or "").strip())
+            text = self._cc.convert((result.get("text") or "").strip())
             segs = result.get("segments", []) or []
             if segs:
                 avg_logprob = float(np.mean([s.get("avg_logprob", -1.0) for s in segs]))
