@@ -3,18 +3,19 @@ from dataclasses import dataclass, asdict
 import numpy as np
 import webrtcvad
 import torch, whisper
-# import sounddevice as sd
 from opencc import OpenCC
 
 SAMPLE_RATE = 16000
 FRAME_MS = 30
 VAD_LEVEL = 2
-SILENCE_MS = 700
+SILENCE_MS = 500
 MAX_UTTER_SEC = 15
-LANG = "zh-tw"
-MODEL_NAME = "medium" # "large-v3"
+LANG = "zh"
+MODEL_NAME = "large-v3"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 MIN_CONFIDENCE = 0.6
+LEAD_MS = 150
+TAIL_MS = 200
 
 @dataclass
 class Utterance:
@@ -36,7 +37,6 @@ class ErrorEvt:
 class Listener:
     def __init__(self,
                 on_utterance=None,
-                input_device=None,
                 sample_rate=SAMPLE_RATE,
                 frame_ms=FRAME_MS,
                 vad_level=VAD_LEVEL,
@@ -46,11 +46,9 @@ class Listener:
                 model_name=MODEL_NAME,
                 device=DEVICE,
                 min_conf=MIN_CONFIDENCE,
-                source="mic"
-            ):
+                source="external"):
         print(f"Listener init: device={device} model={model_name} source={source}")
         self.on_utterance = on_utterance
-        self.input_device = input_device
         self.sample_rate = sample_rate
         self.frame_ms = frame_ms
         self.vad_level = vad_level
@@ -61,25 +59,25 @@ class Listener:
         self.device = device
         self.min_conf = min_conf
         self.source = source
-
         self._audio_stream = None
         self._run = threading.Event()
         self._buffer = bytearray()
         self._buf_lock = threading.Lock()
         self._q = queue.Queue()
         self._start_wall_ts = None
-
         self._vad = webrtcvad.Vad(self.vad_level)
         self._frame_bytes = int(self.sample_rate * (self.frame_ms/1000.0)) * 2
         self._silence_frames = int(self.silence_ms / self.frame_ms)
         self._max_frames = int((self.max_utter_sec*1000) / self.frame_ms)
-
         self._recording = False
         self._frames = []
         self._silence_count = 0
         self._utt_start_ts = None
-
         self._model = whisper.load_model(self.model_name, device=self.device)
+        self.cc = OpenCC('s2t')
+        self._lead_frames = int(LEAD_MS / self.frame_ms)
+        self._tail_frames = int(TAIL_MS / self.frame_ms)
+        self._prev_frames = []
         self._worker = None
 
     def start(self):
@@ -87,20 +85,11 @@ class Listener:
             return
         self._run.set()
         self._start_wall_ts = time.time()
-        if self.source == "mic":
-            self._open_stream()
         self._worker = threading.Thread(target=self._loop, daemon=True)
         self._worker.start()
 
     def stop(self):
         self._run.clear()
-        if self._audio_stream:
-            try:
-                self._audio_stream.stop()
-                self._audio_stream.close()
-            except Exception:
-                pass
-            self._audio_stream = None
         if self._worker and self._worker.is_alive():
             self._worker.join(timeout=1.0)
 
@@ -120,29 +109,6 @@ class Listener:
         with self._buf_lock:
             self._buffer.extend(pcm_bytes)
 
-    def _open_stream(self):
-        if sd is None:
-            self._emit_error("audio_backend_missing", "sounddevice not available")
-            return
-
-        def _cb(indata, frames, time_info, status):
-            if status:
-                self._emit_error("audio_status", detail=str(status))
-            mono = indata[:, 0] if indata.ndim > 1 else indata
-            mono_i16 = (np.clip(mono, -1.0, 1.0) * 32767.0).astype(np.int16)
-            with self._buf_lock:
-                self._buffer.extend(mono_i16.tobytes())
-
-        self._audio_stream = sd.InputStream(
-            device=self.input_device,
-            channels=1,
-            samplerate=self.sample_rate,
-            dtype='float32',
-            blocksize=int(self.sample_rate * (self.frame_ms/1000.0)),
-            callback=_cb
-        )
-        self._audio_stream.start()
-
     def _loop(self):
         while self._run.is_set():
             now_ts = time.time() - self._start_wall_ts
@@ -158,6 +124,9 @@ class Listener:
                 except Exception as e:
                     self._emit_error("vad_fail", str(e))
                     continue
+                self._prev_frames.append(frame)
+                if len(self._prev_frames) > self._lead_frames:
+                    self._prev_frames = self._prev_frames[-self._lead_frames:]
                 if not self._recording and is_speech:
                     self._recording = True
                     self._frames = []
@@ -170,13 +139,23 @@ class Listener:
                     else:
                         self._silence_count += 1
                     if self._silence_count >= self._silence_frames or len(self._frames) >= self._max_frames:
-                        pcm = b"".join(self._frames)
+                        tail = []
+                        for _ in range(self._tail_frames):
+                            with self._buf_lock:
+                                if len(self._buffer) >= self._frame_bytes:
+                                    t = self._buffer[:self._frame_bytes]
+                                    self._buffer = self._buffer[self._frame_bytes:]
+                                    tail.append(t)
+                                else:
+                                    break
+                        pcm = b"".join(self._prev_frames + self._frames + tail)
                         s_ts = self._utt_start_ts if self._utt_start_ts is not None else now_ts
                         e_ts = now_ts
                         self._recording = False
                         self._frames = []
                         self._silence_count = 0
                         self._utt_start_ts = None
+                        self._prev_frames = []
                         self._handle_segment(pcm, s_ts, e_ts)
             time.sleep(0.001)
 
@@ -186,16 +165,22 @@ class Listener:
             if audio_i16.size == 0:
                 return
             audio_f32 = audio_i16 / 32768.0
-            result = self._model.transcribe(audio_f32, language=self.lang, fp16=(self.device == "cuda"))
-            # print("DEBUG ASR result:", result)
-            cc = OpenCC('s2t')  # 簡體轉繁體
-            text = cc.convert((result.get("text") or "").strip())
-            print("DEBUG ASR text:", text)
-            # text = (result.get("text") or "").strip()
+            result = self._model.transcribe(
+                audio_f32,
+                language=self.lang,
+                fp16=(self.device == "cuda"),
+                temperature=0.0,
+                condition_on_previous_text=False,
+                beam_size=5
+            )
+            text = self.cc.convert((result.get("text") or "").strip())
             segs = result.get("segments", []) or []
             if segs:
                 avg_logprob = float(np.mean([s.get("avg_logprob", -1.0) for s in segs]))
-                conf = max(0.0, min(1.0, avg_logprob + 1.0))
+                no_speech = float(result.get("no_speech_prob", 0.0))
+                x = (avg_logprob + 1.2) / 1.1
+                x = max(0.0, min(1.0, x))
+                conf = x * (1.0 - no_speech)
             else:
                 conf = 0.0
             if not text:
@@ -230,14 +215,3 @@ class Listener:
             except Exception:
                 pass
         self._q.put(err)
-
-if __name__ == "__main__":
-    def demo(evt):
-        print(evt)
-    lis = Listener(on_utterance=demo)
-    lis.start()
-    try:
-        while True:
-            time.sleep(0.1)
-    except KeyboardInterrupt:
-        lis.stop()

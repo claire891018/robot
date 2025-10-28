@@ -29,7 +29,6 @@ def health():
 async def asr_ws(ws: WebSocket):
     await ws.accept()
 
-    # 接第一個 start 訊息（可選）
     sample_rate = 16000
     lang = "zh"
     try:
