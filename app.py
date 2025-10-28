@@ -90,3 +90,7 @@ async def asr_ws(ws: WebSocket):
             await ws.close()
         except Exception:
             pass
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=9999)
