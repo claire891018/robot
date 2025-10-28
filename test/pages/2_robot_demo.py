@@ -1,4 +1,5 @@
-import asyncio, threading, json, io, base64
+import asyncio, threading, json, io, base64, time
+from datetime import datetime
 import numpy as np, cv2, av, websockets
 import streamlit as st
 from PIL import Image
@@ -58,9 +59,23 @@ def _init_state():
     ss.setdefault("loop", None)
     ss.setdefault("send_q", None)
     ss.setdefault("recv_q", None)
-    ss.setdefault("shared", {"bbox":None,"depth_m":None,"intent":None,"target":None,"rel_dir":None,"dist_label":None,"last_ctrl":None,"instruction":"","pose":None,"perf":None})
+    ss.setdefault("shared", {
+        "bbox":None,
+        "depth_m":None,
+        "intent":None,
+        "target":None,
+        "rel_dir":None,
+        "dist_label":None,
+        "last_ctrl":None,
+        "instruction":"",
+        "pose":None,
+        "perf":None
+    })
     ss.setdefault("lock", threading.Lock())
     ss.setdefault("infer_every", 5)
+    ss.setdefault("asr_history", [])
+    ss.setdefault("audio_recv_count", 0)
+    ss.setdefault("last_audio_time", None)
 
 def start_ws_once(ws_url: str):
     ss = st.session_state
@@ -81,11 +96,13 @@ class VideoProcessor:
     def __init__(self):
         self._cnt = 0
         start_ws_once(get_ws_url())
+    
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
         img = frame.to_ndarray(format="bgr24")
         self._cnt += 1
         if self._cnt % int(max(1, st.session_state.get("infer_every", 5))) == 0:
             enqueue("bytes", jpeg_bytes(img.copy()))
+        
         got = 0
         while True:
             try:
@@ -93,6 +110,7 @@ class VideoProcessor:
             except asyncio.QueueEmpty:
                 break
             got += 1
+            
             if data.get("type") == "observe":
                 p = data
                 with st.session_state.lock:
@@ -107,9 +125,22 @@ class VideoProcessor:
                     st.session_state.shared["perf"] = p.get("perf")
                     c = p.get("control") or {}
                     st.session_state.shared["last_ctrl"] = (float(c.get("v",0.0)), float(c.get("w",0.0)))
+            
             elif data.get("type") == "utterance":
+                text = data.get("text", "").strip()
+                confidence = data.get("confidence", 0.0)
+                timestamp = datetime.now().strftime('%H:%M:%S')
+                
                 with st.session_state.lock:
-                    st.session_state.shared["instruction"] = data.get("text","")
+                    st.session_state.shared["instruction"] = text
+                    st.session_state.asr_history.append({
+                        "text": text,
+                        "confidence": confidence,
+                        "timestamp": timestamp
+                    })
+                    if len(st.session_state.asr_history) > 10:
+                        st.session_state.asr_history = st.session_state.asr_history[-10:]
+        
         with st.session_state.lock:
             bbox = st.session_state.shared["bbox"]
             depth_m = st.session_state.shared["depth_m"]
@@ -119,6 +150,7 @@ class VideoProcessor:
             dist_label = st.session_state.shared["dist_label"]
             last_ctrl = st.session_state.shared["last_ctrl"]
             instr = st.session_state.shared["instruction"]
+        
         if bbox:
             x1,y1,x2,y2 = bbox
             cv2.rectangle(img,(x1,y1),(x2,y2),(0,255,0),2)
@@ -126,12 +158,18 @@ class VideoProcessor:
             h, w = img.shape[:2]
             cv2.arrowedLine(img,(w//2,h-20),(cx,cy),(0,255,255),2, tipLength=0.15)
             cv2.circle(img,(cx,cy),5,(0,255,255),-1)
-        cv2.putText(img, f"intent={intent} target={target} rel={rel_dir} dist={dist_label}", (10,28), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,255), 2)
-        cv2.putText(img, f"depth_m={None if depth_m is None else round(float(depth_m),2)}", (10,54), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,255), 2)
+        
+        cv2.putText(img, f"intent={intent} target={target} rel={rel_dir} dist={dist_label}", 
+                    (10,28), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,255), 2)
+        cv2.putText(img, f"depth_m={None if depth_m is None else round(float(depth_m),2)}", 
+                    (10,54), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,255), 2)
         if last_ctrl:
-            cv2.putText(img, f"v={last_ctrl[0]:.2f} w={last_ctrl[1]:.2f}", (10,80), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,0), 2)
+            cv2.putText(img, f"v={last_ctrl[0]:.2f} w={last_ctrl[1]:.2f}", 
+                        (10,80), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,0), 2)
         if instr:
-            cv2.putText(img, f"instr={instr}", (10,106), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200,200,200), 2)
+            cv2.putText(img, f"instr={instr}", 
+                        (10,106), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200,200,200), 2)
+        
         return av.VideoFrame.from_ndarray(img, format="bgr24")
     
 def render_header():
@@ -139,8 +177,8 @@ def render_header():
     st.markdown(
         f'''
         <h2 style="display:flex;align-items:center;gap:.5rem;">
-            <img src="{icon}" width="28" height="28" style="border-radius:20%; display:block;" />
-            Robot Demo
+          <img src="{icon}" width="28" height="28" style="border-radius:20%; display:block;" />
+          Robot Demo
         </h2>
         ''',
         unsafe_allow_html=True,
@@ -150,9 +188,11 @@ def main():
     _init_state()
     ws_url = get_ws_url()
     render_header()
+    
     colL, colR = st.columns([2,1])
+    
     with colL:
-        st.subheader("視覺串流")
+        st.subheader("🎥 視覺串流")
         st.slider("推理間隔(幀)", 1, 20, key="infer_every")
         ctx = webrtc_streamer(
             key="av",
@@ -162,11 +202,13 @@ def main():
             async_processing=True,
             rtc_configuration={"iceServers":[{"urls":["stun:stun.l.google.com:19302"]}]},
         )
+        
         if ctx.state.playing and ctx.audio_receiver:
             try:
                 audio_frames = ctx.audio_receiver.get_frames(timeout=1)
             except Exception:
                 audio_frames = []
+            
             for af in audio_frames:
                 arr = af.to_ndarray()
                 if arr.ndim == 2:
@@ -176,21 +218,90 @@ def main():
                 sr = af.sample_rate
                 pcm16 = resample_to_16k(mono, sr).tobytes()
                 enqueue("bytes", b"AUD0" + pcm16)
+                
+                with st.session_state.lock:
+                    st.session_state.audio_recv_count += 1
+                    st.session_state.last_audio_time = time.time()
+    
     with colR:
-        st.subheader("大腦輸出")
+        st.subheader("🧠 大腦輸出")
+        
         with st.container(border=True):
+            st.markdown("### 🎤 音訊狀態")
+            audio_count = st.session_state.get("audio_recv_count", 0)
+            last_audio = st.session_state.get("last_audio_time")
+            
+            if last_audio and (time.time() - last_audio) < 1.0:
+                st.success(f"✅ 正在接收音訊 (已接收 {audio_count} 幀)")
+            elif audio_count > 0:
+                st.warning(f"⚠️ 音訊暫停 (已接收 {audio_count} 幀)")
+            else:
+                st.info("⏸️ 等待音訊輸入...")
+        
+        with st.container(border=True):
+            st.markdown("### 💬 語音識別")
+            
+            with st.session_state.lock:
+                asr_hist = st.session_state.asr_history.copy()
+            
+            if not asr_hist:
+                st.info("等待語音輸入...")
+            else:
+                latest = asr_hist[-1]
+                st.markdown(f"#### 當前指令")
+                st.markdown(f"**「{latest['text']}」**")
+                st.caption(f"置信度: {latest['confidence']:.2%} | 時間: {latest['timestamp']}")
+                
+                if len(asr_hist) > 1:
+                    st.markdown("#### 歷史記錄")
+                    with st.container(height=200):
+                        for item in reversed(asr_hist[:-1]):
+                            conf_color = "🟢" if item['confidence'] > 0.7 else "🟡" if item['confidence'] > 0.5 else "🔴"
+                            st.text(f"{conf_color} [{item['timestamp']}] {item['text']}")
+                            st.caption(f"   置信度: {item['confidence']:.2%}")
+        
+        with st.container(border=True):
+            st.markdown("### 👁️ 視覺與控制")
             with st.session_state.lock:
                 s = st.session_state.shared.copy()
-            st.write(f"Instruction: {s.get('instruction') or '…'}")
-            st.write(f"Intent/Target: {s.get('intent')} / {s.get('target')}")
-            st.write(f"RelDir/DistLabel: {s.get('rel_dir')} / {s.get('dist_label')}")
-            st.write(f"Depth(m): {None if s.get('depth_m') is None else round(float(s.get('depth_m')),2)}")
-            v,w = (s.get('last_ctrl') or (0.0,0.0))
-            st.write(f"Control v,w: {v:.3f}, {w:.3f}")
-            st.write(f"Pose: {s.get('pose')}")
-            st.write(f"Perf: {s.get('perf')}")
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("意圖", s.get('intent') or '—')
+                st.metric("目標", s.get('target') or '—')
+            with col2:
+                st.metric("方位", s.get('rel_dir') or '—')
+                st.metric("距離", s.get('dist_label') or '—')
+            
+            depth = s.get('depth_m')
+            if depth is not None:
+                st.metric("深度 (m)", f"{depth:.2f}")
+            
+            v, w = s.get('last_ctrl') or (0.0, 0.0)
+            st.markdown(f"**控制指令**: `v={v:.3f}, w={w:.3f}`")
+            
+            if s.get('pose'):
+                pose = s['pose']
+                st.caption(f"位姿: x={pose.get('x',0):.2f}, y={pose.get('y',0):.2f}, θ={pose.get('theta',0):.2f}")
+            
+            if s.get('perf'):
+                perf = s['perf']
+                st.caption(f"延遲: {perf.get('latency_ms',0):.1f}ms")
 
-    st.caption("此頁面同時送音訊與影像到 /brain/ws，並即時顯示大腦的觀測與控制輸出。")
+    st.divider()
+    st.caption("此頁面同時傳送音訊與影像到 /brain/ws，並即時顯示大腦的觀測、語音識別與控制輸出。")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("清除 ASR 歷史"):
+            with st.session_state.lock:
+                st.session_state.asr_history = []
+            st.rerun()
+    with col2:
+        if st.button("重置音訊計數"):
+            with st.session_state.lock:
+                st.session_state.audio_recv_count = 0
+            st.rerun()
 
 if __name__ == "__main__":
     main()
