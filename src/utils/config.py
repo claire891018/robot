@@ -10,7 +10,7 @@ MAX_V = 0.6
 MAX_W = 1.2
 
 OLLAMA_URL = "http://localhost:11434/api/chat"
-OLLAMA_MODEL = "gemma-vision:27b"
+OLLAMA_MODEL = "gemma3:27b"
 DEPTH_MODE = "heuristic"
 MIDAS_WEIGHTS = "weights/midas_small.onnx"
 MIDAS_INPUT_SIZE = (256, 256)
