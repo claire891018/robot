@@ -90,9 +90,9 @@ def render_header():
     st.markdown(
         f'''
         <h2 style="display:flex;align-items:center;gap:.5rem;">
-          <img src="{icon}" width="28" height="28"
-               style="border-radius:20%; display:block;" />
-          Listener Demo
+        <img src="{icon}" width="28" height="28"
+            style="border-radius:20%; display:block;" />
+        Listener Demo
         </h2>
         ''',
         unsafe_allow_html=True,
