@@ -227,7 +227,7 @@ def main():
         st.subheader("後端輸出")
         
         with st.container(border=True):
-            st.markdown("### 音訊狀態")
+            st.markdown("#### 音訊狀態")
             audio_count = st.session_state.get("audio_recv_count", 0)
             last_audio = st.session_state.get("last_audio_time")
             
@@ -236,10 +236,10 @@ def main():
             elif audio_count > 0:
                 st.warning(f"音訊暫停 (已接收 {audio_count} 幀)")
             else:
-                st.info("⏸️ 等待音訊輸入...")
+                st.info("等待音訊輸入...")
         
         with st.container(border=True):
-            st.markdown("### 語音識別")
+            st.markdown("#### 語音識別")
             
             with st.session_state.lock:
                 asr_hist = st.session_state.asr_history.copy()
@@ -261,7 +261,7 @@ def main():
                             st.caption(f"   置信度: {item['confidence']:.2%}")
         
         with st.container(border=True):
-            st.markdown("### 視覺與控制")
+            st.markdown("#### 視覺與控制")
             with st.session_state.lock:
                 s = st.session_state.shared.copy()
             

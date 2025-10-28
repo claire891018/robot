@@ -83,6 +83,7 @@ class Vision:
         self.model = mllm_model or OLLAMA_MODEL
         self.depth = depth_model or DepthEstimator(DEPTH_MODE)
         self.focal_px = 0.5 * FRAME_WIDTH / math.tan(math.radians(FOV_DEG/2))
+        print("[Vision] using model:", self.model, "depth_mode:", DEPTH_MODE)
 
     def _endpoints(self):
         base = OLLAMA_URL.rstrip("/")
@@ -97,7 +98,9 @@ class Vision:
     def _ask_mllm(self, frame_bgr: np.ndarray, instruction: str, H: int, W: int) -> Dict[str, Any]:
         b64 = _jpeg_b64_from_bgr(frame_bgr)
         chat_url, gen_url = self._endpoints()
-        sys = "你是多模態導航助理。僅以 JSON 回答，鍵: intent,target,rel_dir,dist_label,bbox。bbox=[x1,y1,x2,y2] 或 null。intent 取 navigate/chat/control。dist_label 取 near/mid/far 或 null。"
+        sys = """你是多模態導航助理。
+        僅以 JSON 回答，鍵: intent,target,rel_dir,dist_label,bbox。bbox=[x1,y1,x2,y2] 或 null。
+        intent 取 navigate/chat/control。dist_label 取 near/mid/far 或 null。"""
         user = f"指令: {instruction}\n請輸出 JSON。"
         try:
             p = {"model": self.model, "messages": [{"role":"system","content":sys},{"role":"user","content":user,"images":[b64]}], "stream": False}
