@@ -43,7 +43,7 @@ def pose_get():
 
 async def _asr_writer(ws: WebSocket, running_flag, tag: str):
     try:
-        print('=='*8)
+        print('=='*15)
         print(f"[ASR_WRITER-{tag}] started")
         while running_flag["on"]:
             evt = await asyncio.to_thread(brain.listener.get, 0.2)
@@ -73,6 +73,7 @@ async def brain_ws(ws: WebSocket):
     print(f"[WS/brain] open #{ws_id}")
     running = {"on": True}
     writer_task = asyncio.create_task(_asr_writer(ws, running, f"brain#{ws_id}"))
+    t_start = time.perf_counter()
     try:
         while True:
             msg = await ws.receive()
@@ -165,6 +166,8 @@ async def brain_ws(ws: WebSocket):
             await ws.close()
         except Exception:
             pass
+        t_total = (time.perf_counter() - t_start) * 1000  
+        print(f"[WS/brain] total time: {t_total:.2f}ms")
         print(f"[WS/brain] finalize #{ws_id}")
 
 @app.websocket("/asr")
