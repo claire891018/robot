@@ -75,7 +75,7 @@ async def brain_ws(ws: WebSocket):
     try:
         while True:
             msg = await ws.receive()
-            print("[DEBUG] got ws msg", msg)
+            print("[DEBUG-Brain] got ws msg", str(msg)[:100])
             if msg.get("type") == "websocket.disconnect":
                 print(f"[WS/brain] disconnect #{ws_id}")
                 break
@@ -140,7 +140,7 @@ async def asr_ws(ws: WebSocket):
     try:
         while True:
             msg = await ws.receive()
-            print("[DEBUG] got ws msg", msg)
+            print("[DEBUG-ASR] got ws msg", str(msg)[:100])
             if msg.get("type") == "websocket.disconnect":
                 print(f"[WS/asr] disconnect #{ws_id}")
                 break
