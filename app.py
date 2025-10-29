@@ -90,14 +90,20 @@ async def brain_ws(ws: WebSocket):
                 if len(b) >= 4 and b[:4] == b"AUD0":
                     stats["audio_pkts"] += 1
                     print(f"[WS/brain] audio pkt #{stats['audio_pkts']} bytes={len(b)-4}")
+                    
+                    t_append = time.perf_counter()
                     brain.append_audio_pcm(b[4:])
+                    print(f"[TIME] append_audio_pcm: {(time.perf_counter()-t_append)*1000:.2f}ms")
                     
                     print(f"[WS/brain] waiting for ASR result...")
                     timeout = 15.0
                     start = time.time()
+                    asr_wait_start = time.perf_counter()
                     while time.time() - start < timeout:
                         evt = await asyncio.to_thread(brain.listener.get, 0.5)
                         if evt:
+                            asr_wait_time = (time.perf_counter() - asr_wait_start) * 1000
+                            print(f"[TIME] ASR wait: {asr_wait_time:.2f}ms")
                             t = evt.get("type")
                             if t == "utterance":
                                 stats["utterances"] += 1
@@ -115,15 +121,20 @@ async def brain_ws(ws: WebSocket):
                     
                 else:
                     stats["video_pkts"] += 1
+                    print(f"[WS/brain] start observe_frame...")
                     t0 = time.perf_counter()
                     out = await asyncio.to_thread(brain.observe_frame, b)
                     dt = (time.perf_counter() - t0) * 1000.0
+                    print(f"[TIME] observe_frame total: {dt:.2f}ms")
                     stats["observes"] += 1
                     payload = {"type": "observe", **out, "perf": {"latency_ms": round(dt,2)}}
                     print(f"[OBS] #{stats['observes']} dt={dt:.2f}ms "
                         f"bbox={out.get('bbox')} depth={out.get('depth_m')} "
                         f"v={out.get('control',{}).get('v')} w={out.get('control',{}).get('w')}")
+                    
+                    t_send = time.perf_counter()
                     await ws.send_text(json.dumps(_pyify(payload), ensure_ascii=False))
+                    print(f"[TIME] send_text: {(time.perf_counter()-t_send)*1000:.2f}ms")
 
             elif msg.get("text") is not None:
                 try:
@@ -176,12 +187,19 @@ async def asr_ws(ws: WebSocket):
                 if len(b) >= 4 and b[:4] == b"AUD0":
                     stats["audio_pkts"] += 1
                     print(f"[WS/asr] audio pkt #{stats['audio_pkts']} bytes={len(b)-4}")
+                    t_append = time.perf_counter()
                     brain.append_audio_pcm(b[4:])
+                    print(f"[TIME] append_audio_pcm: {(time.perf_counter()-t_append)*1000:.2f}ms")
                 else:
                     stats["audio_pkts"] += 1
                     print(f"[WS/asr] raw audio pkt #{stats['audio_pkts']} bytes={len(b)}")
+                    t_append = time.perf_counter()
                     brain.append_audio_pcm(b)
+                    print(f"[TIME] append_audio_pcm: {(time.perf_counter()-t_append)*1000:.2f}ms")
+                
+                t_ack = time.perf_counter()
                 await ws.send_text(json.dumps({"type": "asr_ack"}))
+                print(f"[TIME] send ack: {(time.perf_counter()-t_ack)*1000:.2f}ms")
 
             elif msg.get("text") is not None:
                 try:

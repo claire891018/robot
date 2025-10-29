@@ -59,29 +59,44 @@ with col1:
             with st.spinner("Processing..."):
                 try:
                     async def send_and_receive():
+                        print("[CLIENT] Connecting...")
                         async with websockets.connect(ws_url, max_size=2**24) as ws:
+                            print("[CLIENT] Connected")
                             results = []
                             
                             if audio_file:
                                 audio_bytes = audio_file.getvalue()
                                 pcm_bytes = audio_to_pcm16(audio_bytes)
+                                print(f"[CLIENT] Sending audio {len(pcm_bytes)} bytes")
                                 await ws.send(b"AUD0" + pcm_bytes)
                                 
                                 try:
+                                    print("[CLIENT] Waiting for ASR...")
                                     response = await asyncio.wait_for(ws.recv(), timeout=10.0)
+                                    print(f"[CLIENT] Got ASR response")
                                     data = json.loads(response)
                                     if data.get("type") == "utterance":
                                         results.append(("ASR", data))
                                 except asyncio.TimeoutError:
+                                    print("[CLIENT] ASR timeout")
                                     results.append(("ASR", {"error": "timeout"}))
                             
+                            print(f"[CLIENT] Sending image {len(img_bytes)} bytes")
                             await ws.send(img_bytes)
                             
-                            response = await asyncio.wait_for(ws.recv(), timeout=20.0)
-                            data = json.loads(response)
-                            if data.get("type") == "observe":
-                                results.append(("Vision", data))
+                            try:
+                                print("[CLIENT] Waiting for Vision...")
+                                response = await asyncio.wait_for(ws.recv(), timeout=20.0)
+                                print(f"[CLIENT] Got Vision response: {len(response)} bytes")
+                                data = json.loads(response)
+                                if data.get("type") == "observe":
+                                    results.append(("Vision", data))
+                            except asyncio.TimeoutError:
+                                print("[CLIENT] Vision timeout")
+                            except Exception as e:
+                                print(f"[CLIENT] Vision error: {e}")
                             
+                            print("[CLIENT] Done")
                             return results
                     
                     results = asyncio.run(send_and_receive())
