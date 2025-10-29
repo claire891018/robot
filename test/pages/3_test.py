@@ -2,7 +2,7 @@ import asyncio, threading, json, io, time
 from datetime import datetime
 import numpy as np, cv2, websockets
 import streamlit as st
-from PIL import Image
+from PIL import Image, ImageDraw
 from pydub import AudioSegment
 
 st.set_page_config(page_title="Simple Test", layout="wide")
@@ -24,6 +24,7 @@ def _init_state():
     ss = st.session_state
     ss.setdefault("results", [])
     ss.setdefault("lock", threading.Lock())
+    ss.setdefault("last_image", None)
 
 _init_state()
 
@@ -38,7 +39,8 @@ with col1:
     
     if uploaded_image:
         image = Image.open(uploaded_image)
-        st.image(image, caption="Uploaded Image", use_column_width=True)
+        st.image(image, caption="Uploaded Image", width='stretch')
+        st.session_state.last_image = image
     
     st.divider()
     
@@ -86,15 +88,27 @@ with col1:
                             
                             try:
                                 print("[CLIENT] Waiting for Vision...")
-                                response = await asyncio.wait_for(ws.recv(), timeout=20.0)
-                                print(f"[CLIENT] Got Vision response: {len(response)} bytes")
-                                data = json.loads(response)
-                                if data.get("type") == "observe":
-                                    results.append(("Vision", data))
+                                while True:
+                                    try:
+                                        response = await asyncio.wait_for(ws.recv(), timeout=30.0)
+                                        data = json.loads(response)
+                                        msg_type = data.get('type')
+                                        print(f"[CLIENT] Got response type: {msg_type}")
+                                        
+                                        if msg_type == "observe":
+                                            results.append(("Vision", data))
+                                            print("[CLIENT] Got Vision result")
+                                        else:
+                                            print(f"[CLIENT] Ignoring {msg_type}")
+                                    except (websockets.exceptions.ConnectionClosed, websockets.exceptions.ConnectionClosedOK):
+                                        print("[CLIENT] Backend closed connection")
+                                        break
                             except asyncio.TimeoutError:
                                 print("[CLIENT] Vision timeout")
+                                results.append(("Vision", {"error": "timeout"}))
                             except Exception as e:
                                 print(f"[CLIENT] Vision error: {e}")
+                                results.append(("Vision", {"error": str(e)}))
                             
                             print("[CLIENT] Done")
                             return results
@@ -136,6 +150,14 @@ with col2:
                             st.write(f"Confidence: {data.get('confidence', 0):.2%}")
                     
                     elif result_type == "Vision":
+                        if data.get('bbox') and st.session_state.last_image:
+                            img = st.session_state.last_image.copy()
+                            draw = ImageDraw.Draw(img)
+                            bbox = data['bbox']
+                            x1, y1, x2, y2 = bbox
+                            draw.rectangle([x1, y1, x2, y2], outline="green", width=3)
+                            st.image(img, caption="Detection Result", width='stretch')
+                        
                         col_a, col_b = st.columns(2)
                         with col_a:
                             st.metric("Intent", data.get('intent', '-'))

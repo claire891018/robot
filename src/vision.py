@@ -133,7 +133,7 @@ class Vision:
         frame_hash = _frame_hash(frame_bgr)
         
         if not instruction:
-            return {"intent": "no instruction", "target": "", "rel_dir": None, "dist_label": None, "bbox": None}
+            return {"intent": "conversation", "target": "", "rel_dir": None, "dist_label": None, "bbox": None}
         
         cached = self._get_cached(frame_hash, instruction)
         if cached:
@@ -141,8 +141,36 @@ class Vision:
         
         b64 = _jpeg_b64_from_bgr(frame_bgr)
         chat_url, gen_url = self._endpoints()
-        sys = "你是多模態導航助理。僅以 JSON 回答，鍵: intent,target,rel_dir,dist_label,bbox。bbox=[x1,y1,x2,y2] 或 null。intent 取 navigate/chat/control。dist_label 取 near/mid/far 或 null。"
-        user = f"指令: {instruction}\n請輸出 JSON。"
+        # sys = "你是多模態導航助理，請你先。僅以 JSON 回答，鍵: intent,target,rel_dir,dist_label,bbox。bbox=[x1,y1,x2,y2] 或 null。intent 取 navigate/chat/control。dist_label 取 near/mid/far 或 null。"
+        # user = f"指令: {instruction}\n請輸出 JSON。"
+        sys = """你是多模態導航助理。請按以下步驟分析：
+
+        1. 觀察圖片：描述你看到的場景、物體和環境
+        2. 理解指令：分析用戶想要什麼
+        3. 定位目標：在圖片中找到相關物體的位置
+        4. 評估方位與距離：判斷目標相對於畫面中心的方向和遠近
+
+        最後以 JSON 格式輸出：
+        {
+        "intent": "navigate/chat/control",
+        "target": "目標物體名稱",
+        "rel_dir": "left/center/right",
+        "dist_label": "near/mid/far",
+        "bbox": [x1, y1, x2, y2]
+        }
+
+        注意：
+        - bbox 是目標物體的邊界框座標，格式為 [左上x, 左上y, 右下x, 右下y]，如果沒有明確目標則為 null
+        - intent: navigate=導航到某處, chat=對話, control=控制動作
+        - dist_label: near=<1m, mid=1-3m, far=>3m
+        """
+        user = f"""指令: {instruction}
+
+        請按步驟分析圖片並回答：
+        1. 你看到什麼？
+        2. 指令要求什麼？
+        3. 目標在哪裡？
+        4. 輸出 JSON"""
         try:
             print(f"[MLLM] Asking model by /chat ='{self.model}' instruction='{instruction}'")
             p = {"model": self.model, "messages": [{"role":"system","content":sys},{"role":"user","content":user,"images":[b64]}], "stream": False}
