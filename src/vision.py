@@ -91,6 +91,7 @@ class Vision:
         self._cache_ttl = 2.0
         self._last_frame_hash = None
         self._last_instruction = None
+        print(f"[VISION] MLLM model={self.model} Depth mode={self.depth.mode} FOV={FOV_DEG}° focal={self.focal_px:.1f}px")
 
     def _endpoints(self):
         base = OLLAMA_URL.rstrip("/")
