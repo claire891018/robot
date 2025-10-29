@@ -3,6 +3,7 @@ from datetime import datetime
 import numpy as np, cv2, websockets
 import streamlit as st
 from PIL import Image
+from pydub import AudioSegment
 
 st.set_page_config(page_title="Simple Test", layout="wide")
 
@@ -11,6 +12,13 @@ def get_ws_url():
         return st.secrets.get("API_WS", "ws://140.116.158.98:9999/brain/ws")
     except Exception:
         return "ws://140.116.158.98:9999/brain/ws"
+
+def audio_to_pcm16(audio_bytes) -> bytes:
+    audio = AudioSegment.from_file(io.BytesIO(audio_bytes))
+    audio = audio.set_channels(1)
+    audio = audio.set_frame_rate(16000)
+    audio = audio.set_sample_width(2)
+    return audio.raw_data
 
 def _init_state():
     ss = st.session_state
@@ -56,7 +64,8 @@ with col1:
                             
                             if audio_file:
                                 audio_bytes = audio_file.getvalue()
-                                await ws.send(b"AUD0" + audio_bytes)
+                                pcm_bytes = audio_to_pcm16(audio_bytes)
+                                await ws.send(b"AUD0" + pcm_bytes)
                                 
                                 try:
                                     response = await asyncio.wait_for(ws.recv(), timeout=5.0)
