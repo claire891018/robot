@@ -43,7 +43,7 @@ def pose_get():
 
 async def _asr_writer(ws: WebSocket, running_flag, tag: str):
     try:
-        print(f"[ASR_WRITER]")
+        print(f"[ASR_WRITER-{tag}] started")
         while running_flag["on"]:
             evt = await asyncio.to_thread(brain.listener.get, 0.2)
             if not evt:
@@ -75,7 +75,12 @@ async def brain_ws(ws: WebSocket):
     try:
         while True:
             msg = await ws.receive()
-            print("[DEBUG-Brain] got ws msg", str(msg)[:100])
+            
+            if msg.get("bytes"):
+                print(f"[DEBUG-Brain] got bytes len={len(msg['bytes'])}")
+            else:
+                print(f"[DEBUG-Brain] got ws msg {str(msg)[:100]}")
+            
             if msg.get("type") == "websocket.disconnect":
                 print(f"[WS/brain] disconnect #{ws_id}")
                 break
@@ -86,7 +91,28 @@ async def brain_ws(ws: WebSocket):
                     stats["audio_pkts"] += 1
                     print(f"[WS/brain] audio pkt #{stats['audio_pkts']} bytes={len(b)-4}")
                     brain.append_audio_pcm(b[4:])
-                    await ws.send_text(json.dumps({"type": "asr_ack"}))
+                    
+                    print(f"[WS/brain] waiting for ASR result...")
+                    timeout = 15.0
+                    start = time.time()
+                    while time.time() - start < timeout:
+                        evt = await asyncio.to_thread(brain.listener.get, 0.5)
+                        if evt:
+                            t = evt.get("type")
+                            if t == "utterance":
+                                stats["utterances"] += 1
+                                txt = (evt.get("text") or "").strip()
+                                conf = evt.get("confidence")
+                                print(f"[WS/brain-ASR] text='{txt}' conf={conf}")
+                                await ws.send_text(json.dumps(_pyify(evt), ensure_ascii=False))
+                                break
+                            elif t == "error":
+                                print(f"[WS/brain-ASR] error={evt.get('error')}")
+                                await ws.send_text(json.dumps(_pyify(evt), ensure_ascii=False))
+                                break
+                    else:
+                        print(f"[WS/brain] ASR timeout after {timeout}s")
+                    
                 else:
                     stats["video_pkts"] += 1
                     t0 = time.perf_counter()
@@ -140,7 +166,7 @@ async def asr_ws(ws: WebSocket):
     try:
         while True:
             msg = await ws.receive()
-            print("[DEBUG-ASR] got ws msg", str(msg)[:100])
+            print(f"[DEBUG-ASR] got ws msg {str(msg)[:100]}")
             if msg.get("type") == "websocket.disconnect":
                 print(f"[WS/asr] disconnect #{ws_id}")
                 break

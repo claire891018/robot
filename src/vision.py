@@ -144,19 +144,22 @@ class Vision:
         sys = "你是多模態導航助理。僅以 JSON 回答，鍵: intent,target,rel_dir,dist_label,bbox。bbox=[x1,y1,x2,y2] 或 null。intent 取 navigate/chat/control。dist_label 取 near/mid/far 或 null。"
         user = f"指令: {instruction}\n請輸出 JSON。"
         try:
-            print(f"[MLLM] Asking model='{self.model}' instruction='{instruction}'")
+            print(f"[MLLM] Asking model by /chat ='{self.model}' instruction='{instruction}'")
             p = {"model": self.model, "messages": [{"role":"system","content":sys},{"role":"user","content":user,"images":[b64]}], "stream": False}
             r = requests.post(chat_url, json=p, timeout=10)
             r.raise_for_status()
             content = r.json().get("message", {}).get("content", "") or ""
             j = _json_loose(content) or {}
+            print(f"[MLLM] Response: {str(j)[:100]}")
         except:
             try:
+                print(f"[MLLM] Asking model by /generate ='{self.model}' instruction='{instruction}'")
                 pr = {"model": self.model, "prompt": sys + "\n" + user, "images": [b64], "stream": False}
                 r2 = requests.post(gen_url, json=pr, timeout=10)
                 r2.raise_for_status()
                 content = r2.json().get("response", "") or ""
                 j = _json_loose(content) or {}
+                print(f"[MLLM] Response: {str(j)[:100]}")
             except:
                 j = {}
         intent = j.get("intent") or ("navigate" if instruction else "observe")
