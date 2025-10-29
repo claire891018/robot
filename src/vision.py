@@ -144,6 +144,7 @@ class Vision:
         sys = "你是多模態導航助理。僅以 JSON 回答，鍵: intent,target,rel_dir,dist_label,bbox。bbox=[x1,y1,x2,y2] 或 null。intent 取 navigate/chat/control。dist_label 取 near/mid/far 或 null。"
         user = f"指令: {instruction}\n請輸出 JSON。"
         try:
+            print(f"[MLLM] Asking model='{self.model}' instruction='{instruction}'")
             p = {"model": self.model, "messages": [{"role":"system","content":sys},{"role":"user","content":user,"images":[b64]}], "stream": False}
             r = requests.post(chat_url, json=p, timeout=10)
             r.raise_for_status()

@@ -1,8 +1,9 @@
-import asyncio, threading, json, io, time
+import asyncio, threading, json, io, time, queue
 from datetime import datetime
-import numpy as np, cv2, websockets
+import numpy as np, cv2, av, websockets
 import streamlit as st
 from PIL import Image
+from streamlit_webrtc import webrtc_streamer, WebRtcMode
 
 st.set_page_config(page_title="Simple Test", layout="wide")
 
@@ -12,10 +13,20 @@ def get_ws_url():
     except Exception:
         return "ws://140.116.158.98:9999/brain/ws"
 
+def resample_to_16k(mono_i16: np.ndarray, sr: int) -> np.ndarray:
+    if sr == 16000: return mono_i16.astype(np.int16, copy=False)
+    x = mono_i16.astype(np.float32); n_in = x.shape[-1]
+    n_out = int(round(n_in * 16000 / sr))
+    if n_out <= 0 or n_in <= 1: return np.zeros(0, dtype=np.int16)
+    xp = np.linspace(0.0, 1.0, num=n_in, endpoint=False)
+    x_new = np.linspace(0.0, 1.0, num=n_out, endpoint=False)
+    return np.interp(x_new, xp, x).astype(np.int16)
+
 def _init_state():
     ss = st.session_state
     ss.setdefault("results", [])
     ss.setdefault("lock", threading.Lock())
+    ss.setdefault("audio_buffer", bytearray())
 
 _init_state()
 
@@ -34,10 +45,40 @@ with col1:
     
     st.divider()
     
-    audio_file = st.file_uploader("Upload Audio (optional)", type=["wav", "mp3"])
+    st.markdown("**Record Audio (optional)**")
     
-    if audio_file:
-        st.audio(audio_file)
+    ctx = webrtc_streamer(
+        key="audio-recorder",
+        mode=WebRtcMode.SENDONLY,
+        audio_receiver_size=2048,
+        media_stream_constraints={"audio": True},
+        rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
+    )
+    
+    if ctx.state.playing and ctx.audio_receiver:
+        try:
+            audio_frames = ctx.audio_receiver.get_frames(timeout=1)
+        except queue.Empty:
+            audio_frames = []
+        
+        for af in audio_frames:
+            arr = af.to_ndarray()
+            if arr.ndim == 2:
+                mono = arr.mean(axis=0).astype(np.int16)
+            else:
+                mono = arr.astype(np.int16)
+            sr = af.sample_rate
+            pcm16 = resample_to_16k(mono, sr)
+            st.session_state.audio_buffer.extend(pcm16.tobytes())
+        
+        audio_len = len(st.session_state.audio_buffer) / 16000 / 2
+        st.info(f"Recording... {audio_len:.1f}s")
+    
+    if len(st.session_state.audio_buffer) > 0:
+        st.success(f"Recorded {len(st.session_state.audio_buffer) / 16000 / 2:.1f}s of audio")
+        if st.button("Clear Audio"):
+            st.session_state.audio_buffer = bytearray()
+            st.rerun()
     
     st.divider()
     
@@ -46,7 +87,6 @@ with col1:
     if st.button("Send to Brain", type="primary", disabled=not uploaded_image):
         if uploaded_image:
             ws_url = get_ws_url()
-            
             img_bytes = uploaded_image.getvalue()
             
             with st.spinner("Processing..."):
@@ -55,9 +95,8 @@ with col1:
                         async with websockets.connect(ws_url, max_size=2**24) as ws:
                             results = []
                             
-                            if audio_file:
-                                audio_bytes = audio_file.getvalue()
-                                await ws.send(b"AUD0" + audio_bytes)
+                            if len(st.session_state.audio_buffer) > 0:
+                                await ws.send(b"AUD0" + bytes(st.session_state.audio_buffer))
                                 
                                 try:
                                     response = await asyncio.wait_for(ws.recv(), timeout=5.0)
