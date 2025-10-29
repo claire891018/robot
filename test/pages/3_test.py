@@ -68,7 +68,7 @@ with col1:
                                 await ws.send(b"AUD0" + pcm_bytes)
                                 
                                 try:
-                                    response = await asyncio.wait_for(ws.recv(), timeout=5.0)
+                                    response = await asyncio.wait_for(ws.recv(), timeout=10.0)
                                     data = json.loads(response)
                                     if data.get("type") == "utterance":
                                         results.append(("ASR", data))
@@ -77,7 +77,7 @@ with col1:
                             
                             await ws.send(img_bytes)
                             
-                            response = await asyncio.wait_for(ws.recv(), timeout=10.0)
+                            response = await asyncio.wait_for(ws.recv(), timeout=20.0)
                             data = json.loads(response)
                             if data.get("type") == "observe":
                                 results.append(("Vision", data))
