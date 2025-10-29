@@ -133,7 +133,7 @@ class Vision:
         frame_hash = _frame_hash(frame_bgr)
         
         if not instruction:
-            return {"intent": "observe", "target": "", "rel_dir": None, "dist_label": None, "bbox": None}
+            return {"intent": "no instruction", "target": "", "rel_dir": None, "dist_label": None, "bbox": None}
         
         cached = self._get_cached(frame_hash, instruction)
         if cached:
