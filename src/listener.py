@@ -8,7 +8,7 @@ from opencc import OpenCC
 SAMPLE_RATE = 16000
 FRAME_MS = 30
 VAD_LEVEL = 2
-SILENCE_MS = 500
+SILENCE_MS = 300
 MAX_UTTER_SEC = 15
 LANG = "zh"
 MODEL_NAME = "large-v3"
@@ -215,3 +215,13 @@ class Listener:
             except Exception:
                 pass
         self._q.put(err)
+        
+    # def clear_queue(self):
+    #     cleared = 0
+    #     while not self._q.empty():
+    #         try:
+    #             self._q.get_nowait()
+    #             cleared += 1
+    #         except:
+    #             break
+    #     return cleared

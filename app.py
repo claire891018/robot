@@ -89,13 +89,32 @@ async def brain_ws(ws: WebSocket):
 
             if msg.get("bytes") is not None:
                 b = msg["bytes"]
+                
                 if len(b) >= 4 and b[:4] == b"AUD0":
                     stats["audio_pkts"] += 1
                     print(f"[WS/brain] audio pkt #{stats['audio_pkts']} bytes={len(b)-4}")
                     
+                    # print(f"[WS/brain] clearing queue...")
+                    # cleared = 0
+                    # while not brain.listener._q.empty():
+                    #     try:
+                    #         brain.listener._q.get_nowait()
+                    #         cleared += 1
+                    #     except:
+                    #         break
+                    # print(f"[WS/brain] cleared {cleared} items from queue")
+                    
                     t_append = time.perf_counter()
                     brain.append_audio_pcm(b[4:])
                     print(f"[TIME] append_audio_pcm: {(time.perf_counter()-t_append)*1000:.2f}ms")
+    
+                # if len(b) >= 4 and b[:4] == b"AUD0":
+                #     stats["audio_pkts"] += 1
+                #     print(f"[WS/brain] audio pkt #{stats['audio_pkts']} bytes={len(b)-4}")
+                    
+                #     t_append = time.perf_counter()
+                #     brain.append_audio_pcm(b[4:])
+                #     print(f"[TIME] append_audio_pcm: {(time.perf_counter()-t_append)*1000:.2f}ms")
                     
                     print(f"[WS/brain] waiting for ASR result...")
                     timeout = 15.0
