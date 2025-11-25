@@ -4,8 +4,8 @@ import asyncio
 import numpy as np
 import wave
 import json
+import hashlib
 from datetime import datetime
-from io import BytesIO
 
 WS_URL = "ws://140.116.158.98:9999/brain/ws/chat"
 
@@ -21,8 +21,8 @@ if "conversation" not in st.session_state:
 if "tts_audio" not in st.session_state:
     st.session_state.tts_audio = None
 
-if "last_audio_id" not in st.session_state:
-    st.session_state.last_audio_id = None
+if "processed_audios" not in st.session_state:
+    st.session_state.processed_audios = set()
 
 def header():
     icon = "https://api.dicebear.com/9.x/thumbs/svg?"
@@ -123,14 +123,14 @@ async def ws_send_and_wait(audio_pcm: np.ndarray):
     except Exception as e:
         return "", f"WebSocket 錯誤: {e}", None
 
-# 處理音訊 - 用 ID 判斷是否是新的錄音
+# 處理音訊 - 用內容 hash 判斷
 if audio_bytes is not None:
-    # 產生當前音訊的唯一 ID
-    current_audio_id = id(audio_bytes)
+    # 計算音訊內容的 hash
+    audio_hash = hashlib.md5(audio_bytes.getvalue()).hexdigest()
     
-    # 只有當這是新的錄音時才處理
-    if current_audio_id != st.session_state.last_audio_id:
-        st.session_state.last_audio_id = current_audio_id
+    # 只處理沒處理過的音訊
+    if audio_hash not in st.session_state.processed_audios:
+        st.session_state.processed_audios.add(audio_hash)
         
         with st.spinner("AI 思考中..."):
             try:
@@ -163,7 +163,7 @@ with c1:
     if st.button("清除對話內容"):
         st.session_state.conversation = []
         st.session_state.tts_audio = None
-        st.session_state.last_audio_id = None
+        st.session_state.processed_audios = set()
         st.rerun()
 with c2:
     if st.button("重整頁面"):
