@@ -74,13 +74,11 @@ async def brain_loop_async(send_q: queue.Queue, recv_q: queue.Queue, url: str):
                             audio_bytes = b[4:]
                             recv_q.put({"type": "tts_audio", "audio": audio_bytes})
                         else:
-                            recv_q.put(
-                                {
-                                    "type": "error",
-                                    "error": "unknown_binary",
-                                    "detail": f"len={len(b)}",
-                                }
-                            )
+                            recv_q.put({
+                                "type": "error",
+                                "error": "unknown_binary",
+                                "detail": f"len={len(b)}",
+                            })
                     else:
                         try:
                             evt = json.loads(msg)
@@ -106,7 +104,11 @@ async def brain_loop_async(send_q: queue.Queue, recv_q: queue.Queue, url: str):
                     await asyncio.sleep(0.05)
                 elif kind == "end":
                     await ws.send(json.dumps({"type": "end"}))
+                    recv_q.put({"type": "info", "detail": "處理中，請稍候..."})
+                    # 等待伺服器回覆
+                    await asyncio.sleep(30)
                     break
+                    
         finally:
             reader_task.cancel()
             try:
@@ -130,7 +132,7 @@ def render_header():
         """,
         unsafe_allow_html=True,
     )
-    st.caption("點擊 START，對著麥克風說話，機器人會聽、回、而且開口說。")
+    st.caption("點擊 START 開始說話，按 STOP 停止錄音，機器人會處理後回覆你。")
 
 
 def render_events(container):
@@ -139,7 +141,7 @@ def render_events(container):
             utterances = [
                 e
                 for e in st.session_state.listen_events
-                if e.get("type") in ("utterance", "reply", "error")
+                if e.get("type") in ("utterance", "reply", "error", "info")
             ]
             recent = utterances[-20:]
             recent.reverse()
@@ -162,6 +164,8 @@ def render_events(container):
                         st.markdown(f"**機器人：** {txt}")
                         st.caption(f"時間: {timestamp}")
                         st.divider()
+                elif t == "info":
+                    st.info(evt.get("detail", ""))
                 elif t == "error":
                     st.error(f"[錯誤] {evt.get('error')} - {evt.get('detail')}")
 
@@ -307,15 +311,17 @@ def main():
                 )
 
         else:
+            # 使用者按下 STOP
             if st.session_state.listen_ws_running:
                 try:
                     st.session_state.listen_send_q.put_nowait(("end", None))
                 except Exception:
                     pass
-                st.session_state.listen_ws_running = False
-                st.session_state.listen_ws_thread = None
+                # 不要立刻關閉，讓 WebSocket 有時間接收回覆
+                time.sleep(2)
             break
 
+    # 最後更新一次畫面
     render_events(events_container)
     if st.session_state.tts_last_audio:
         tts_player.audio(
