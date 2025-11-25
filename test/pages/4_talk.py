@@ -3,9 +3,9 @@ import websockets
 import asyncio
 import numpy as np
 import wave
-import base64
 import json
 from datetime import datetime
+from io import BytesIO
 
 WS_URL = "ws://140.116.158.98:9999/brain/ws/chat"
 
@@ -20,6 +20,9 @@ if "conversation" not in st.session_state:
 
 if "tts_audio" not in st.session_state:
     st.session_state.tts_audio = None
+
+if "last_audio_id" not in st.session_state:
+    st.session_state.last_audio_id = None
 
 def header():
     icon = "https://api.dicebear.com/9.x/thumbs/svg?"
@@ -46,15 +49,18 @@ with col2:
     st.subheader("對話紀錄")
     box = st.container(height=500)
     with box:
-        for role, text, ts in reversed(st.session_state.conversation):
-            if role == "user":
-                st.markdown(f"**你：** {text}")
-                st.caption(ts)
-                st.divider()
-            else:
-                st.markdown(f"**機器人：** {text}")
-                st.caption(ts)
-                st.divider()
+        if not st.session_state.conversation:
+            st.info("還沒有對話紀錄，開始錄音吧！")
+        else:
+            for role, text, ts in reversed(st.session_state.conversation):
+                if role == "user":
+                    st.markdown(f"**你：** {text}")
+                    st.caption(ts)
+                    st.divider()
+                else:
+                    st.markdown(f"**機器人：** {text}")
+                    st.caption(ts)
+                    st.divider()
 
 def load_wav_16k_mono(raw):
     with wave.open(raw, "rb") as wf:
@@ -77,63 +83,88 @@ def load_wav_16k_mono(raw):
 
 async def ws_send_and_wait(audio_pcm: np.ndarray):
     try:
-        async with websockets.connect(WS_URL, ping_interval=None) as ws:
+        async with websockets.connect(WS_URL, ping_interval=20, ping_timeout=10) as ws:
             chunk_size = 1600
             for i in range(0, len(audio_pcm), chunk_size):
-                await ws.send(b"AUD0" + audio_pcm[i:i+chunk_size].tobytes())
-                await asyncio.sleep(0.05)
+                chunk = audio_pcm[i:i+chunk_size]
+                if len(chunk) > 0:
+                    await ws.send(b"AUD0" + chunk.tobytes())
+                    await asyncio.sleep(0.05)
 
             user_text = ""
             reply_text = ""
             tts_audio = None
 
-            while True:
+            timeout_count = 0
+            while timeout_count < 60:
                 try:
-                    msg = await asyncio.wait_for(ws.recv(), timeout=30)
-                except:
-                    break
-
-                if isinstance(msg, bytes):
-                    b = bytes(msg)
-                    if b[:4] == b"TTS0":
-                        tts_audio = b[4:]
+                    msg = await asyncio.wait_for(ws.recv(), timeout=1.0)
+                    
+                    if isinstance(msg, bytes):
+                        b = bytes(msg)
+                        if len(b) >= 4 and b[:4] == b"TTS0":
+                            tts_audio = b[4:]
+                            break
+                    else:
+                        evt = json.loads(msg)
+                        if evt.get("type") == "utterance":
+                            user_text = evt.get("text", "")
+                        elif evt.get("type") == "reply":
+                            reply_text = evt.get("text", "")
+                            
+                except asyncio.TimeoutError:
+                    timeout_count += 1
+                    if reply_text and tts_audio:
                         break
-                else:
-                    evt = json.loads(msg)
-                    if evt.get("type") == "utterance":
-                        user_text = evt.get("text", "")
-                    elif evt.get("type") == "reply":
-                        reply_text = evt.get("text", "")
+                    continue
 
             return user_text, reply_text, tts_audio
 
     except Exception as e:
-        return "", f"WebSocket錯誤: {e}", None
+        return "", f"WebSocket 錯誤: {e}", None
 
+# 處理音訊 - 用 ID 判斷是否是新的錄音
 if audio_bytes is not None:
-    with st.spinner("AI 思考中..."):
-        audio_pcm = load_wav_16k_mono(audio_bytes)
-        user_text, reply_text, tts_audio = asyncio.run(ws_send_and_wait(audio_pcm))
+    # 產生當前音訊的唯一 ID
+    current_audio_id = id(audio_bytes)
+    
+    # 只有當這是新的錄音時才處理
+    if current_audio_id != st.session_state.last_audio_id:
+        st.session_state.last_audio_id = current_audio_id
+        
+        with st.spinner("AI 思考中..."):
+            try:
+                audio_pcm = load_wav_16k_mono(audio_bytes)
+                user_text, reply_text, tts_audio = asyncio.run(ws_send_and_wait(audio_pcm))
 
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    if user_text:
-        st.session_state.conversation.append(("user", user_text, ts))
-    if reply_text:
-        st.session_state.conversation.append(("bot", reply_text, ts))
-    if tts_audio:
-        st.session_state.tts_audio = tts_audio
-
+                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                
+                if user_text:
+                    st.session_state.conversation.append(("user", user_text, ts))
+                if reply_text:
+                    st.session_state.conversation.append(("bot", reply_text, ts))
+                if tts_audio:
+                    st.session_state.tts_audio = tts_audio
+                
+                st.success("處理完成！")
+                st.rerun()
+                
+            except Exception as e:
+                st.error(f"錯誤: {str(e)}")
 
 st.subheader("機器人回覆語音")
 if st.session_state.tts_audio:
     st.audio(st.session_state.tts_audio, format="audio/wav")
+else:
+    st.info("還沒有語音回覆")
 
 c1, c2 = st.columns(2)
 with c1:
     if st.button("清除對話內容"):
         st.session_state.conversation = []
         st.session_state.tts_audio = None
+        st.session_state.last_audio_id = None
+        st.rerun()
 with c2:
     if st.button("重整頁面"):
-        st.session_state.conversation = []
-        st.session_state.tts_audio = None
+        st.rerun()
