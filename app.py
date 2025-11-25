@@ -1,118 +1,168 @@
-import json
-import asyncio
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+import json, asyncio, time
+from fastapi import FastAPI, Body, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from src.brain import Brain
 from src.speaker import Speaker
 
-app = FastAPI()
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app = FastAPI(title="Robot API", version="0.3.1")
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-brain = Brain(speaker=Speaker())
-stats = {"asr_ws": 0, "brain_ws": 0, "chat_ws": 0, "audio_pkts": 0, "video_pkts": 0, "utterances": 0, "observes": 0}
+speaker = Speaker()
+brain = Brain(speaker=speaker)
+
+stats = {"asr_ws": 0, "brain_ws": 0, "audio_pkts": 0, "video_pkts": 0, "utterances": 0, "observes": 0}
 
 def _pyify(obj):
-    import numpy as np
+    import numpy as _np
     if isinstance(obj, (str, int, float, bool)) or obj is None:
         return obj
     if isinstance(obj, (list, tuple)):
         return [_pyify(x) for x in obj]
     if isinstance(obj, dict):
         return {str(k): _pyify(v) for k, v in obj.items()}
-    if isinstance(obj, (np.integer,)):
+    if isinstance(obj, (_np.integer,)):
         return int(obj)
-    if isinstance(obj, (np.floating,)):
+    if isinstance(obj, (_np.floating,)):
         return float(obj)
-    if isinstance(obj, (np.ndarray,)):
+    if isinstance(obj, (_np.ndarray,)):
         return _pyify(obj.tolist())
     return str(obj)
-
 
 @app.get("/health")
 def health():
     return {"ok": True, "stats": stats}
 
+@app.post("/pose/update")
+def pose_update(payload: dict = Body(...)):
+    brain.update_pose(payload or {})
+    p = brain.pose
+    return {"ok": True, "pose": {"x": p.x, "y": p.y, "theta": p.theta}}
+
+@app.get("/pose")
+def pose_get():
+    p = brain.pose
+    return {"x": p.x, "y": p.y, "theta": p.theta}
+
+async def _asr_writer(ws: WebSocket, running_flag, tag: str):
+    try:
+        while running_flag["on"]:
+            evt = await asyncio.to_thread(brain.listener.get, 0.2)
+            if not evt:
+                continue
+            try:
+                await ws.send_text(json.dumps(_pyify(evt), ensure_ascii=False))
+            except:
+                break
+    except:
+        pass
 
 @app.websocket("/asr")
 async def asr_ws(ws: WebSocket):
     await ws.accept()
     stats["asr_ws"] += 1
     ws_id = stats["asr_ws"]
+    running = {"on": True}
+    writer_task = asyncio.create_task(_asr_writer(ws, running, f"asr#{ws_id}"))
     try:
         while True:
             msg = await ws.receive()
             if msg.get("type") == "websocket.disconnect":
                 break
-            if msg.get("bytes"):
+            if msg.get("bytes") is not None:
                 b = msg["bytes"]
-                if len(b) >= 4 and b[:4] == b"AUD0":
-                    brain.append_audio_pcm(b[4:])
-                    evt = await asyncio.to_thread(brain.listener.get, 0.3)
-                    if evt:
-                        await ws.send_text(json.dumps(_pyify(evt), ensure_ascii=False))
+                stats["audio_pkts"] += 1
+                brain.append_audio_pcm(b[4:] if len(b) >= 4 and b[:4] == b"AUD0" else b)
+                await ws.send_text(json.dumps({"type": "asr_ack"}))
+            elif msg.get("text") is not None:
+                try:
+                    data = json.loads(msg["text"])
+                    if data.get("type") == "end":
+                        break
+                except:
+                    await ws.send_text(json.dumps({"type": "error", "error": "bad_text_json"}))
     except WebSocketDisconnect:
         pass
-
+    finally:
+        running["on"] = False
+        writer_task.cancel()
+        await ws.close()
 
 @app.websocket("/brain/ws")
 async def brain_ws(ws: WebSocket):
     await ws.accept()
     stats["brain_ws"] += 1
     ws_id = stats["brain_ws"]
+    running = {"on": True}
+    writer_task = asyncio.create_task(_asr_writer(ws, running, f"brain#{ws_id}"))
     try:
         while True:
             msg = await ws.receive()
             if msg.get("type") == "websocket.disconnect":
                 break
-            if msg.get("bytes"):
+            if msg.get("bytes") is not None:
                 b = msg["bytes"]
                 if len(b) >= 4 and b[:4] == b"AUD0":
+                    stats["audio_pkts"] += 1
                     brain.append_audio_pcm(b[4:])
-                    evt = await asyncio.to_thread(brain.listener.get, 0.3)
-                    if evt:
-                        await ws.send_text(json.dumps(_pyify(evt), ensure_ascii=False))
-                else:
-                    jpeg = b
-                    out = await asyncio.to_thread(brain.observe_frame, jpeg)
-                    await ws.send_text(json.dumps(_pyify(out), ensure_ascii=False))
+                    timeout = 15.0
+                    start = time.time()
+                    while time.time() - start < timeout:
+                        evt = await asyncio.to_thread(brain.listener.get, 0.5)
+                        if evt:
+                            await ws.send_text(json.dumps(_pyify(evt), ensure_ascii=False))
+                            break
+            elif msg.get("text") is not None:
+                try:
+                    data = json.loads(msg["text"])
+                    if data.get("type") == "end":
+                        break
+                except:
+                    await ws.send_text(json.dumps({"type": "error", "error": "bad_json"}))
     except WebSocketDisconnect:
         pass
-
+    finally:
+        running["on"] = False
+        writer_task.cancel()
+        await ws.close()
 
 @app.websocket("/brain/ws/chat")
-async def brain_chat_ws(ws: WebSocket):
+async def brain_ws_chat(ws: WebSocket):
     await ws.accept()
-    stats["chat_ws"] += 1
-    ws_id = stats["chat_ws"]
-    session_id = f"chat#{ws_id}"
+    session_id = f"chat"
     try:
         while True:
             msg = await ws.receive()
             if msg.get("type") == "websocket.disconnect":
                 break
-            if msg.get("bytes"):
+            if msg.get("bytes") is not None:
                 b = msg["bytes"]
                 if len(b) >= 4 and b[:4] == b"AUD0":
-                    brain.append_audio_pcm(b[4:])
-                    evt = await asyncio.to_thread(brain.listener.get, 0.4)
-                    if evt and evt.get("type") == "utterance":
-                        text = evt["text"]
-                        await ws.send_text(json.dumps(_pyify(evt), ensure_ascii=False))
-                        result = await brain.handle_utterance(session_id, text)
-                        await ws.send_text(json.dumps({
-                            "type": "reply",
-                            "text": result["reply_text"]
-                        }, ensure_ascii=False))
-                        if result["audio"]:
-                            await ws.send_bytes(b"TTS0" + result["audio"])
+                    pcm = b[4:]
+                    brain.listener.append_pcm(pcm)
+                    evt = None
+                    for _ in range(200):
+                        e = brain.listener.get(timeout=0.1)
+                        if e and e.get("type") == "utterance":
+                            evt = e
+                            break
+                    if evt is None:
+                        continue
+                    user_text = evt.get("text", "").strip()
+                    await ws.send_text(json.dumps({"type": "utterance", "text": user_text}, ensure_ascii=False))
+                    out = brain.handle_utterance(session_id, user_text)
+                    reply = out.get("reply_text", "")
+                    audio = out.get("audio", None)
+                    await ws.send_text(json.dumps({"type": "reply", "text": reply}, ensure_ascii=False))
+                    if audio:
+                        await ws.send_bytes(b"TTS0" + audio)
+            elif msg.get("text") is not None:
+                data = json.loads(msg["text"])
+                if data.get("type") == "end":
+                    break
     except WebSocketDisconnect:
         pass
-
+    finally:
+        await ws.close()
 
 if __name__ == "__main__":
     import uvicorn
