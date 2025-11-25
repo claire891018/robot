@@ -1,8 +1,15 @@
 import json, asyncio, time
 from fastapi import FastAPI, Body, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi import UploadFile, File
+
+import base64
+import numpy as np
+import time
+
 from src.brain import Brain
 from src.speaker import Speaker
+
 
 app = FastAPI(title="Robot API", version="0.3.1")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -10,7 +17,7 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 speaker = Speaker()
 brain = Brain(speaker=speaker)
 
-stats = {"asr_ws": 0, "brain_ws": 0, "audio_pkts": 0, "video_pkts": 0, "utterances": 0, "observes": 0}
+stats = {"asr_ws": 0, "chat_ws": 0, "brain_ws": 0, "audio_pkts": 0, "video_pkts": 0, "utterances": 0, "observes": 0}
 
 def _pyify(obj):
     import numpy as _np
@@ -126,43 +133,70 @@ async def brain_ws(ws: WebSocket):
         await ws.close()
 
 @app.websocket("/brain/ws/chat")
-async def brain_ws_chat(ws: WebSocket):
+async def brain_chat_ws(ws: WebSocket):
     await ws.accept()
-    session_id = f"chat"
+    stats["chat_ws"] += 1
+    ws_id = stats["chat_ws"]
+    session_id = f"chat#{ws_id}"
     try:
         while True:
             msg = await ws.receive()
             if msg.get("type") == "websocket.disconnect":
                 break
-            if msg.get("bytes") is not None:
+            if msg.get("bytes"):
                 b = msg["bytes"]
                 if len(b) >= 4 and b[:4] == b"AUD0":
-                    pcm = b[4:]
-                    brain.listener.append_pcm(pcm)
-                    evt = None
-                    for _ in range(200):
-                        e = brain.listener.get(timeout=0.1)
-                        if e and e.get("type") == "utterance":
-                            evt = e
-                            break
-                    if evt is None:
-                        continue
-                    user_text = evt.get("text", "").strip()
-                    await ws.send_text(json.dumps({"type": "utterance", "text": user_text}, ensure_ascii=False))
-                    out = brain.handle_utterance(session_id, user_text)
-                    reply = out.get("reply_text", "")
-                    audio = out.get("audio", None)
-                    await ws.send_text(json.dumps({"type": "reply", "text": reply}, ensure_ascii=False))
-                    if audio:
-                        await ws.send_bytes(b"TTS0" + audio)
-            elif msg.get("text") is not None:
-                data = json.loads(msg["text"])
-                if data.get("type") == "end":
-                    break
+                    brain.append_audio_pcm(b[4:])
+                    evt = await asyncio.to_thread(brain.listener.get, 0.4)
+                    if evt and evt.get("type") == "utterance":
+                        text = evt["text"]
+                        await ws.send_text(json.dumps(_pyify(evt), ensure_ascii=False))
+                        result = await brain.handle_utterance(session_id, text)
+                        await ws.send_text(json.dumps({
+                            "type": "reply",
+                            "text": result["reply_text"]
+                        }, ensure_ascii=False))
+                        if result["audio"]:
+                            await ws.send_bytes(b"TTS0" + result["audio"])
     except WebSocketDisconnect:
         pass
-    finally:
-        await ws.close()
+    
+@app.post("/brain/voice_chat")
+async def voice_chat(file: UploadFile = File(...)):
+    raw = await file.read()
+    pcm = np.frombuffer(raw, dtype=np.int16)
+
+    result = {}
+
+    def _cb(evt):
+        if evt.get("type") == "utterance":
+            result["evt"] = evt
+
+    old = brain.listener.on_utterance
+    brain.listener.on_utterance = _cb
+    brain.listener.append_pcm(pcm.tobytes())
+
+    for _ in range(200):
+        if "evt" in result:
+            break
+        time.sleep(0.05)
+
+    brain.listener.on_utterance = old
+
+    if "evt" not in result:
+        return {"user_text": "", "reply_text": "我聽不清楚", "tts": ""}
+
+    user_text = result["evt"]["text"]
+    out = await brain.handle_utterance("rest", user_text)
+
+    audio = out.get("audio")
+    tts_b64 = base64.b64encode(audio).decode() if audio else ""
+
+    return {
+        "user_text": user_text,
+        "reply_text": out.get("reply_text",""),
+        "tts": tts_b64
+    }
 
 if __name__ == "__main__":
     import uvicorn
