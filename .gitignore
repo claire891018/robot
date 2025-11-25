@@ -4,6 +4,7 @@ log.txt
 
 old/
 
+test/test_ws_tts.py
 */__pycache__/
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -221,3 +222,4 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+test/test_ws_tts.py

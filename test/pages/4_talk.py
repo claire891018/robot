@@ -11,11 +11,10 @@ import matplotlib.pyplot as plt
 import websockets
 from PIL import Image
 
-# 換成「大腦」的 WebSocket
 try:
-    BRAIN_WS_URL = st.secrets.get("BRAIN_WS_URL", "ws://140.116.158.98:9999/brain/ws")
+    BRAIN_WS_URL = st.secrets.get("BRAIN_WS_URL", "ws://140.116.158.98:9999/brain/ws/chat")
 except Exception:
-    BRAIN_WS_URL = "ws://140.116.158.98:9999/brain/ws"
+    BRAIN_WS_URL = "ws://140.116.158.98:9999/brain/ws/chat"
 
 st.set_page_config(
     page_title="對話機器人 Demo",
@@ -58,19 +57,15 @@ def resample_to_16k(mono_i16: np.ndarray, sr: int) -> np.ndarray:
 
 
 async def brain_loop_async(send_q: queue.Queue, recv_q: queue.Queue, url: str):
-    """
-    對接 /brain/ws：
-    - 傳：AUD0 + PCM16
-    - 收：
-        * JSON 文字（ASR 等）
-        * bytes，以 TTS0 開頭：TTS wav 音檔
-    """
-    async with websockets.connect(url, max_size=2**23) as ws:
+    async with websockets.connect(
+        url,
+        max_size=2**23,
+        ping_interval=None,
+    ) as ws:
 
         async def reader():
             try:
                 async for msg in ws:
-                    # bytes -> 可能是 TTS 音檔
                     if isinstance(msg, (bytes, bytearray)):
                         b = bytes(msg)
                         if len(b) >= 4 and b[:4] == b"TTS0":
@@ -84,7 +79,6 @@ async def brain_loop_async(send_q: queue.Queue, recv_q: queue.Queue, url: str):
                                     "detail": f"len={len(b)}",
                                 }
                             )
-                    # str -> JSON 事件
                     else:
                         try:
                             evt = json.loads(msg)
@@ -128,7 +122,11 @@ def render_header():
 def render_events(container):
     with container.container():
         with st.session_state.listen_lock:
-            utterances = [e for e in st.session_state.listen_events if e.get("type") in ("utterance", "reply", "error")]
+            utterances = [
+                e
+                for e in st.session_state.listen_events
+                if e.get("type") in ("utterance", "reply", "error")
+            ]
             recent = utterances[-20:]
             recent.reverse()
         if not recent:
@@ -166,8 +164,6 @@ def main():
         async_processing=True,
         rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
     )
-    # st.write("ctx.state:", ctx.state)
-    # st.write("ctx.audio_receiver:", ctx.audio_receiver)
 
     col1, col2 = st.columns([1, 1])
     with col1:
@@ -178,7 +174,6 @@ def main():
         with st.container(height=550):
             events_container = st.empty()
 
-    # 機器人回覆語音播放器
     st.subheader("機器人回覆語音")
     tts_player = st.empty()
 
@@ -189,7 +184,6 @@ def main():
 
     while True:
         if ctx.state.playing and ctx.audio_receiver:
-            # 啟動 WS worker
             if not st.session_state.listen_ws_running:
                 t = threading.Thread(
                     target=ws_worker,
@@ -220,7 +214,6 @@ def main():
                     chs = 1
                 sr = af.sample_rate
 
-                # 送 16k mono PCM 給 /brain/ws
                 mono_16k = resample_to_16k(mono, sr)
                 if mono_16k.size > 0:
                     try:
@@ -244,7 +237,6 @@ def main():
                 )
                 sound_chunk += sound
 
-            # 畫波形 / 頻譜
             if len(sound_chunk) > 0:
                 if sound_window_buffer is None:
                     sound_window_buffer = pydub.AudioSegment.silent(
@@ -284,7 +276,6 @@ def main():
 
                 fig_place.pyplot(fig)
 
-            # 處理從 WS 收回來的事件
             while True:
                 try:
                     evt = st.session_state.listen_recv_q.get_nowait()
@@ -292,15 +283,12 @@ def main():
                     break
 
                 if evt.get("type") == "tts_audio":
-                    # 更新最後一段機器人語音
                     st.session_state.tts_last_audio = evt.get("audio")
                 else:
                     on_evt(evt)
 
-            # 更新對話文字
             render_events(events_container)
 
-            # 更新 Audio Player
             if st.session_state.tts_last_audio:
                 tts_player.audio(
                     st.session_state.tts_last_audio,

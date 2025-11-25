@@ -28,40 +28,49 @@ class Brain:
         self.pose = Pose(0.0, 0.0, 0.0)
         self.goal = None
 
+        # last ASR text (for vision)
         self.last_instruction = ""
         self._lock = threading.Lock()
         self._new_instruction = False
         self._last_perception: Optional[Perception] = None
 
-        # 大腦手上有一個 Speaker，可以叫它說話
-        self.speaker: Optional[Speaker] = speaker
+        # speaker
+        self.speaker = speaker
 
-        # ASR Listener（耳朵）
+        # Listener = Whisper + VAD
         self.listener = Listener(on_utterance=self._on_asr_evt, source="external")
         self.listener.start()
 
-        # LLM 對話歷史（每個 session 一份）
+        # dialogue memory
         self._conversations: Dict[str, list] = {}
 
-    # ======== 語音事件給「視覺 / 導航」用 ========
+        # async HTTP client for LLM
+        self._client = httpx.AsyncClient(timeout=60)
+
+
+    # ===========================================
+    #     ASR event (Listener callback)
+    # ===========================================
     def _on_asr_evt(self, evt: dict):
-        """
-        Listener 有新 utterance 時會呼叫這個 callback，
-        這裡只負責更新 last_instruction，給 VLM / 導航用。
-        """
         if evt.get("type") == "utterance" and evt.get("text"):
             with self._lock:
-                new_text = evt["text"]
-                if new_text != self.last_instruction:
-                    self.last_instruction = new_text
+                text = evt["text"]
+                if text != self.last_instruction:
+                    self.last_instruction = text
                     self._new_instruction = True
-                    print(f"[BRAIN] 新指令: '{new_text}' (標記需要視覺推理)")
+                    print(f"[BRAIN] 新指令: '{text}' (需要重新視覺推理)")
 
-    # ======== 將外部 PCM 丟給 Listener ========
+
+    # ===========================================
+    #     Audio ingestion from /brain/ws
+    # ===========================================
     def append_audio_pcm(self, pcm_bytes: bytes):
         self.listener.append_pcm(pcm_bytes)
 
-    # ======== 位姿 ========
+
+    # ===========================================
+    #     Pose
+    # ===========================================
     def update_pose(self, pose: Dict[str, float]):
         with self._lock:
             self.pose = Pose(
@@ -70,27 +79,31 @@ class Brain:
                 float(pose.get("theta", 0.0)),
             )
 
-    # ======== 視覺推理 ========
+
+    # ===========================================
+    #            VISION + NAVIGATION
+    # ===========================================
     def observe_frame(self, jpeg_bytes: bytes) -> Dict[str, Any]:
+
         with self._lock:
             instr = self.last_instruction or ""
-            cur = Pose(self.pose.x, self.pose.y, self.pose.theta)
-            need_mllm = self._new_instruction
-            if need_mllm:
+            cur_pose = Pose(self.pose.x, self.pose.y, self.pose.theta)
+            need_vlm = self._new_instruction
+            if need_vlm:
                 self._new_instruction = False
 
         frame = _jpeg_to_bgr(jpeg_bytes)
 
-        if need_mllm or not self._last_perception:
-            print(f"[BRAIN] 執行視覺推理 (指令: '{instr}')")
-            p: Perception = self.vision.perceive(frame, instr)
+        if need_vlm or not self._last_perception:
+            print(f"[BRAIN] 重新執行視覺推理 (指令: '{instr}')")
+            p = self.vision.perceive(frame, instr)
             self._last_perception = p
         else:
-            print(f"[BRAIN] 重用視覺結果 (指令: '{instr}')")
+            print(f"[BRAIN] 重用上一次視覺結果")
             p = self._last_perception
 
         guide = self._guide_from_bbox(frame, p)
-        c = self._plan(cur, p, guide)
+        c = self._plan(cur_pose, p, guide)
 
         return {
             "instruction": instr,
@@ -105,10 +118,11 @@ class Brain:
                 "v": 0.0 if c is None else c.v,
                 "w": 0.0 if c is None else c.w,
             },
-            "pose": {"x": cur.x, "y": cur.y, "theta": cur.theta},
+            "pose": {"x": cur_pose.x, "y": cur_pose.y, "theta": cur_pose.theta},
         }
 
-    def _guide_from_bbox(self, frame_bgr: np.ndarray, p: Perception) -> Dict[str, Any]:
+
+    def _guide_from_bbox(self, frame_bgr, p: Perception) -> Dict[str, Any]:
         h, w = frame_bgr.shape[:2]
         if not p.bbox:
             return {
@@ -118,53 +132,50 @@ class Brain:
                 "waypoint_img": None,
                 "polyline_img": [],
             }
+
         x1, y1, x2, y2 = p.bbox
         cx = (x1 + x2) // 2
-        cy = (y1 + y2) // 2
-        dx = cx - (w // 2)
+        dx = cx - w // 2
+
         steer = float(dx) / float(max(1, w // 2)) * 30.0
         turn = "straight" if abs(steer) < 5 else ("left" if steer < 0 else "right")
+
         return {
             "steer_angle_deg": steer,
             "turn": turn,
             "distance_m": p.depth_m,
-            "waypoint_img": [int(cx), int(cy)],
+            "waypoint_img": [cx, (y1 + y2) // 2],
             "polyline_img": [],
         }
+
 
     def _plan(self, cur: Pose, p: Perception, guide: Dict[str, Any]) -> Optional[Control]:
         if p.intent != "navigate":
             return Control(0.0, 0.0)
-        if p.depth_m is None or guide.get("turn") == "search":
+
+        if p.depth_m is None or guide["turn"] == "search":
             return Control(0.0, 0.0)
-        ang = float(guide.get("steer_angle_deg") or 0.0)
-        dist = float(p.depth_m)
+
+        ang = guide["steer_angle_deg"]
+        dist = p.depth_m
+
         v = max(0.0, min(0.3, dist * 0.2))
         w = max(-0.6, min(0.6, -ang * 0.03))
+
         c = Control(v, w)
         self.ctrl.send(c)
         return c
 
-    # ======== 大腦：處理一句話，要不要回、回什麼，還有聲音 ========
+
+    # ===========================================
+    #       LLM + TTS 回覆（async）
+    # ===========================================
     async def handle_utterance(self, session_id: str, text: str) -> Dict[str, Any]:
-        """
-        大腦收到一句使用者的話，決定：
-        - 要不要用 LLM 回覆
-        - 回覆文字是什麼
-        - 如果有 Speaker，順便產生 TTS 音檔
-
-        回傳:
-            {
-                "reply_text": str 或 None,
-                "need_tts": bool,
-                "audio": Optional[bytes],
-            }
-        """
-        text = (text or "").strip()
+        text = text.strip()
         if not text:
-            return {"reply_text": None, "need_tts": False, "audio": None}
+            return {"reply_text": None, "audio": None, "need_tts": False}
 
-        # 未來這裡可以加「指令判斷」，現在先純聊天
+        # 取得或新建對話 session
         conv = self._conversations.get(session_id)
         if conv is None:
             conv = [{"role": "system", "content": SYSPROMPT.strip()}]
@@ -172,44 +183,35 @@ class Brain:
 
         conv.append({"role": "user", "content": text})
 
-        payload = {
-            "model": OLLAMA_MODEL,
-            "messages": conv,
-            "stream": False,
-        }
-
-        # 用 httpx async 呼叫 Ollama
+        # ===== 呼叫 LLM（用 HTTPX async）=====
         try:
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                resp = await client.post(OLLAMA_URL, json=payload)
-                resp.raise_for_status()
-                data = resp.json()
+            resp = await self._client.post(
+                OLLAMA_URL,
+                json={"model": OLLAMA_MODEL, "messages": conv, "stream": False},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
         except Exception as e:
             print(f"[BRAIN/LLM_ERR] {e}")
-            reply = "我這邊好像出了一點狀況，等等再試試看。"
-            audio_bytes = None
-            if self.speaker is not None:
-                try:
-                    audio_bytes = await self.speaker.say(reply)
-                except Exception as e2:
-                    print(f"[BRAIN/SPEAKER_ERR_WHEN_FAIL] {e2}")
-                    audio_bytes = None
-            return {"reply_text": reply, "need_tts": True, "audio": audio_bytes}
+            reply = "我這邊好像有點狀況，等一下再試試看。"
+            audio = (
+                await self.speaker.say(reply)
+                if self.speaker is not None else None
+            )
+            return {"reply_text": reply, "audio": audio, "need_tts": True}
 
         msg = data.get("message") or {}
-        reply = (msg.get("content") or "").strip()
-        if not reply:
-            reply = "我有點聽不清楚，可以再說一次嗎？"
+        reply = msg.get("content", "").strip() or "我聽不太清楚，可以再說一次嗎？"
 
         conv.append({"role": "assistant", "content": reply})
 
-        # 在大腦裡就直接請 speaker 幫忙生音檔
-        audio_bytes: Optional[bytes] = None
+        # ===== 呼叫 Speaker =====
+        audio = None
         if self.speaker is not None:
             try:
-                audio_bytes = await self.speaker.say(reply)
+                audio = await self.speaker.say(reply)   # ★ 正確 await
             except Exception as e:
                 print(f"[BRAIN/SPEAKER_ERR] {e}")
-                audio_bytes = None
 
-        return {"reply_text": reply, "need_tts": True, "audio": audio_bytes}
+        return {"reply_text": reply, "audio": audio, "need_tts": True}
