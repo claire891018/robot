@@ -123,8 +123,8 @@ def main():
         async_processing=True,
         rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
     )
-    st.write("ctx.state:", ctx.state)
-    st.write("ctx.audio_receiver:", ctx.audio_receiver)
+    # st.write("ctx.state:", ctx.state)
+    # st.write("ctx.audio_receiver:", ctx.audio_receiver)
     
     col1, col2 = st.columns([1, 1])
     with col1:
