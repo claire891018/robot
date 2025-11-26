@@ -11,9 +11,9 @@ import matplotlib.pyplot as plt
 import websockets
 
 try:
-    ASR_WS_URL = st.secrets.get("ASR_DIAR_WS_URL", "ws://140.116.158.98:9997/asr/diarization")
+    ASR_WS_URL = st.secrets.get("ASR_DIAR_WS_URL", "ws://140.116.158.98:9999/asr/diarization")
 except Exception:
-    ASR_WS_URL = "ws://140.116.158.98:9997/asr/diarization"
+    ASR_WS_URL = "ws://140.116.158.98:9999/asr/diarization"
 
 st.set_page_config(
     page_title="Diarization Demo",

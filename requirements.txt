@@ -100,3 +100,4 @@ webrtcvad==2.0.10
 websockets==15.0.1
 opencv-python
 python-dotenv
+python-multipart
