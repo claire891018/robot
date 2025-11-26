@@ -11,9 +11,9 @@ import matplotlib.pyplot as plt
 import websockets
 
 try:
-    ASR_WS_URL = st.secrets.get("ASR_DIAR_WS_URL", "ws://140.116.158.98:9999/asr/diarization")
+    ASR_WS_URL = st.secrets.get("ASR_DIAR_WS_URL", "ws://140.116.158.98:9997/asr/diarization")
 except Exception:
-    ASR_WS_URL = "ws://140.116.158.98:9999/asr/diarization"
+    ASR_WS_URL = "ws://140.116.158.98:9997/asr/diarization"
 
 st.set_page_config(
     page_title="Diarization Demo",
@@ -93,10 +93,12 @@ def ws_worker(send_q: queue.Queue, recv_q: queue.Queue, url: str):
 
 def render_header():
     """渲染頁面標題"""
+    icon = "https://api.dicebear.com/9.x/thumbs/svg?"
     st.markdown(
-        '''
+        f'''
         <h2 style="display:flex;align-items:center;gap:.5rem;">
-          🎤 Real-Time Multispeaker ASR–Diarization Demo
+          <img src="{icon}" width="28" height="28" style="border-radius:20%; display:block;" />
+          Real-Time Multispeaker ASR–Diarization Demo
         </h2>
         ''',
         unsafe_allow_html=True,

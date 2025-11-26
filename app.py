@@ -6,25 +6,25 @@ from fastapi import UploadFile, File
 import base64
 import numpy as np
 import time
-import torch
+# import torch
 
 from src.brain import Brain
 from src.speaker import Speaker
 
-from src.listener_with_diarization import ListenerWithDiarization
+# from src.listener_with_diarization import ListenerWithDiarization
 
 app = FastAPI(title="Robot API", version="0.3.1")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-listener_with_diar = ListenerWithDiarization(
-    sample_rate=16000,
-    device="cuda" if torch.cuda.is_available() else "cpu",
-    source="diarization"
-)
-listener_with_diar.start()
-
 speaker = Speaker()
 brain = Brain(speaker=speaker)
+
+# listener_with_diar = ListenerWithDiarization(
+#     sample_rate=16000,
+#     device="cuda",
+#     source="diarization"
+# )
+# listener_with_diar.start()
 
 stats = {"asr_ws": 0, "chat_ws": 0, "brain_ws": 0, "audio_pkts": 0, "video_pkts": 0, "utterances": 0, "observes": 0}
 
@@ -207,81 +207,81 @@ async def voice_chat(file: UploadFile = File(...)):
         "tts": tts_b64
     }
 
-@app.websocket("/asr/diarization")
-async def asr_diarization_ws(ws: WebSocket):
-    """
-    ASR + Speaker Diarization WebSocket
-    完整的即時語音辨識 + 說話人辨識
-    """
-    await ws.accept()
-    stats["asr_ws"] += 1
-    ws_id = stats["asr_ws"]
+# @app.websocket("/asr/diarization")
+# async def asr_diarization_ws(ws: WebSocket):
+#     """
+#     ASR + Speaker Diarization WebSocket
+#     完整的即時語音辨識 + 說話人辨識
+#     """
+#     await ws.accept()
+#     stats["asr_ws"] += 1
+#     ws_id = stats["asr_ws"]
     
-    running = {"on": True}
+#     running = {"on": True}
     
-    # Writer: 將辨識結果傳給前端
-    async def writer():
-        try:
-            while running["on"]:
-                evt = await asyncio.to_thread(listener_with_diar.get, 0.2)
-                if not evt:
-                    continue
-                try:
-                    await ws.send_text(json.dumps(_pyify(evt), ensure_ascii=False))
-                except:
-                    break
-        except:
-            pass
+#     # Writer: 將辨識結果傳給前端
+#     async def writer():
+#         try:
+#             while running["on"]:
+#                 evt = await asyncio.to_thread(listener_with_diar.get, 0.2)
+#                 if not evt:
+#                     continue
+#                 try:
+#                     await ws.send_text(json.dumps(_pyify(evt), ensure_ascii=False))
+#                 except:
+#                     break
+#         except:
+#             pass
     
-    writer_task = asyncio.create_task(writer())
+#     writer_task = asyncio.create_task(writer())
     
-    try:
-        while True:
-            msg = await ws.receive()
+#     try:
+#         while True:
+#             msg = await ws.receive()
             
-            if msg.get("type") == "websocket.disconnect":
-                break
+#             if msg.get("type") == "websocket.disconnect":
+#                 break
             
-            if msg.get("bytes") is not None:
-                # 音訊資料
-                b = msg["bytes"]
-                stats["audio_pkts"] += 1
+#             if msg.get("bytes") is not None:
+#                 # 音訊資料
+#                 b = msg["bytes"]
+#                 stats["audio_pkts"] += 1
                 
-                # 去除 header 後送給 listener
-                pcm = b[4:] if len(b) >= 4 and b[:4] == b"AUD0" else b
-                listener_with_diar.append_pcm(pcm)
+#                 # 去除 header 後送給 listener
+#                 pcm = b[4:] if len(b) >= 4 and b[:4] == b"AUD0" else b
+#                 listener_with_diar.append_pcm(pcm)
                 
-                # 確認訊息
-                await ws.send_text(json.dumps({"type": "ack"}))
+#                 # 確認訊息
+#                 await ws.send_text(json.dumps({"type": "ack"}))
                 
-            elif msg.get("text") is not None:
-                # 控制訊息
-                try:
-                    data = json.loads(msg["text"])
+#             elif msg.get("text") is not None:
+#                 # 控制訊息
+#                 try:
+#                     data = json.loads(msg["text"])
                     
-                    if data.get("type") == "end":
-                        break
-                    elif data.get("type") == "reset_speakers":
-                        # 重置說話人資料庫
-                        listener_with_diar.reset_speakers()
-                        await ws.send_text(json.dumps({
-                            "type": "speakers_reset",
-                            "message": "說話人資料已重置"
-                        }))
+#                     if data.get("type") == "end":
+#                         break
+#                     elif data.get("type") == "reset_speakers":
+#                         # 重置說話人資料庫
+#                         listener_with_diar.reset_speakers()
+#                         await ws.send_text(json.dumps({
+#                             "type": "speakers_reset",
+#                             "message": "說話人資料已重置"
+#                         }))
                         
-                except Exception as e:
-                    await ws.send_text(json.dumps({
-                        "type": "error",
-                        "error": "bad_json",
-                        "detail": str(e)
-                    }))
+#                 except Exception as e:
+#                     await ws.send_text(json.dumps({
+#                         "type": "error",
+#                         "error": "bad_json",
+#                         "detail": str(e)
+#                     }))
     
-    except WebSocketDisconnect:
-        pass
-    finally:
-        running["on"] = False
-        writer_task.cancel()
-        await ws.close()
+#     except WebSocketDisconnect:
+#         pass
+#     finally:
+#         running["on"] = False
+#         writer_task.cancel()
+#         await ws.close()
 
 if __name__ == "__main__":
     import uvicorn

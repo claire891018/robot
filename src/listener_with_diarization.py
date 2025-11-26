@@ -1,8 +1,3 @@
-# src/listener_with_diarization.py
-"""
-整合 Speaker Diarization 的 Listener
-繼承原本的 Listener，加上 diarization 功能
-"""
 import threading, time, queue
 from dataclasses import dataclass, asdict
 import numpy as np
@@ -52,6 +47,7 @@ class ListenerWithDiarization(Listener):
         處理音訊片段
         覆寫父類別的方法，加上 diarization
         """
+        print(f"[DEBUG] 收到音訊片段: {len(pcm)} bytes, {s_ts:.2f}s - {e_ts:.2f}s")
         try:
             audio_i16 = np.frombuffer(pcm, dtype=np.int16).astype(np.float32)
             if audio_i16.size == 0:

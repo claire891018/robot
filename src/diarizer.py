@@ -1,9 +1,12 @@
 import numpy as np
 import torch
-import threading
+import warnings
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 from collections import deque
+
+# 忽略 SpeechBrain 的 deprecation 警告
+warnings.filterwarnings("ignore", message="Module 'speechbrain.pretrained'")
 
 @dataclass
 class SpeakerSegment:
@@ -20,7 +23,7 @@ class Diarizer:
     即時說話人辨識模組
     
     實作論文提出的:
-    1. X-vector embedding extraction
+    1. X-vector embedding extraction (via SpeechBrain)
     2. Incremental clustering (cosine similarity threshold)
     3. Embedding update (EWMA)
     4. Temporal smoothing (5-second window)
@@ -28,9 +31,9 @@ class Diarizer:
     
     def __init__(
         self,
-        similarity_threshold: float = 0.75,  # cosine similarity 門檻
-        ewma_alpha: float = 0.9,             # EWMA 更新係數
-        smoothing_window: float = 5.0,       # 時間平滑視窗(秒)
+        similarity_threshold: float = 0.75,
+        ewma_alpha: float = 0.9,
+        smoothing_window: float = 5.0,
         device: str = "cuda"
     ):
         print(f"[Diarizer] 初始化 (device={device})")
@@ -41,34 +44,36 @@ class Diarizer:
         self.device = device
         
         # 說話人資料庫
-        self.speakers: Dict[int, np.ndarray] = {}  # {speaker_id: embedding}
+        self.speakers: Dict[int, np.ndarray] = {}
         self.next_id = 1
         
         # 時間平滑用的歷史記錄
-        self.history: deque = deque(maxlen=100)  # 保留最近 100 個片段
+        self.history: deque = deque(maxlen=100)
         
-        # 載入 embedding 模型 (使用 pyannote.audio 的 x-vector)
+        # 載入 SpeechBrain x-vector 模型
         try:
-            from pyannote.audio import Model
-            from pyannote.audio.pipelines import SpeakerEmbedding
+            # 使用新的 API (speechbrain.inference)
+            try:
+                from speechbrain.inference.speaker import EncoderClassifier
+            except ImportError:
+                # Fallback to old API
+                from speechbrain.pretrained import EncoderClassifier
             
-            self.embedding_model = Model.from_pretrained(
-                "pyannote/embedding",
-                use_auth_token=False
-            ).to(self.device)
+            print("[Diarizer] 載入 SpeechBrain x-vector 模型...")
             
-            self.embedding_extractor = SpeakerEmbedding(
-                embedding=self.embedding_model,
-                device=torch.device(self.device)
+            self.embedding_model = EncoderClassifier.from_hparams(
+                source="speechbrain/spkrec-xvect-voxceleb",
+                savedir="pretrained_models/spkrec-xvect-voxceleb",
+                run_opts={"device": self.device}
             )
             
-            print("[Diarizer] ✓ Embedding model loaded")
+            print("[Diarizer] ✓ X-vector model loaded (SpeechBrain)")
             
         except Exception as e:
-            print(f"[Diarizer] ⚠️  Embedding model 載入失敗: {e}")
-            print("[Diarizer] 將使用 dummy embeddings (僅供測試)")
+            print(f"[Diarizer] ✗ Embedding model 載入失敗: {e}")
+            print("[Diarizer] 系統將無法正常運作")
             self.embedding_model = None
-            self.embedding_extractor = None
+            raise
     
     def extract_embedding(self, audio_segment: np.ndarray, sr: int = 16000) -> np.ndarray:
         """
@@ -81,29 +86,32 @@ class Diarizer:
         Returns:
             embedding vector (512-dim)
         """
-        if self.embedding_extractor is None:
-            # Dummy embedding (僅供測試)
-            return np.random.randn(512).astype(np.float32)
-        
         try:
             # 轉換為 float32 並正規化
             if audio_segment.dtype == np.int16:
                 audio_f32 = audio_segment.astype(np.float32) / 32768.0
             else:
-                audio_f32 = audio_segment
+                audio_f32 = audio_segment.astype(np.float32)
             
-            # 使用 pyannote 提取 embedding
-            # 注意: pyannote 需要 torch tensor
+            # 確保是 1D array
+            if audio_f32.ndim > 1:
+                audio_f32 = audio_f32.squeeze()
+            
+            # SpeechBrain 需要 torch tensor
             audio_tensor = torch.from_numpy(audio_f32).unsqueeze(0).to(self.device)
             
+            # 提取 embedding
             with torch.no_grad():
-                embedding = self.embedding_model(audio_tensor)
+                embedding = self.embedding_model.encode_batch(audio_tensor)
                 embedding = embedding.squeeze().cpu().numpy()
             
             return embedding
             
         except Exception as e:
             print(f"[Diarizer] Embedding extraction 失敗: {e}")
+            import traceback
+            traceback.print_exc()
+            # 返回 dummy embedding
             return np.random.randn(512).astype(np.float32)
     
     def cosine_similarity(self, emb1: np.ndarray, emb2: np.ndarray) -> float:
@@ -207,7 +215,7 @@ class Diarizer:
         處理單一 utterance，返回帶有 speaker_id 的結果
         
         Args:
-            audio_segment: 音訊片段
+            audio_segment: 音訊片段 (int16 numpy array)
             text: 辨識文字
             start_ts: 開始時間
             end_ts: 結束時間
@@ -250,3 +258,5 @@ class Diarizer:
         self.speakers = {}
         self.history.clear()
         self.next_id = 1
+        print("[Diarizer] 說話人資料已重置")
+        
